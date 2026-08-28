@@ -197,10 +197,10 @@ function populateTeamSelect() {
 
 function populateCreateLeagueSelects() {
   const sel = $('cl-teams');
-  [4, 6, 8, 10, 12, 14, 16].forEach((n) => {
+  [2, 4, 6, 8, 10, 12, 14, 16].forEach((n) => {
     const o = document.createElement('option');
     o.value = n;
-    o.textContent = `${n} teams`;
+    o.textContent = n === 2 ? '2 teams — head-to-head / testing' : `${n} teams`;
     if (n === 10) o.selected = true;
     sel.appendChild(o);
   });
@@ -331,6 +331,7 @@ function openLeagueSettings() {
     <select id="ls-playoffs">
       <option value="6" ${league.playoff_teams === 6 ? 'selected' : ''}>6 teams — top 2 seeds get a bye</option>
       <option value="4" ${league.playoff_teams === 4 ? 'selected' : ''}>4 teams — semis &amp; championship</option>
+      <option value="2" ${league.playoff_teams === 2 ? 'selected' : ''}>2 teams — championship game only</option>
     </select>
     <label class="ls-label">Roster Construction</label>
     <div class="roster-grid" id="ls-roster">${rosterEditorHtml('ls', leagueRoster(league))}</div>
@@ -374,6 +375,8 @@ async function saveLeagueSettings() {
       return toast(`You already have ${teams.length} teams — can't shrink below that.`, true);
     if (num_teams % num_divisions !== 0)
       return toast('Divisions must split the teams evenly.', true);
+    if (playoff_teams > num_teams)
+      return toast(`A ${num_teams}-team league can't send ${playoff_teams} teams to the playoffs.`, true);
     const roster = collectRosterForm('ls');
     if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
       return toast('Your roster needs at least one starting spot!', true);
@@ -539,6 +542,8 @@ async function handleCreateLeague(e) {
   const draftLocal = $('cl-draft').value;
   const teamName = $('cl-teamname').value.trim();
   if (!name || !teamName || !draftLocal) return;
+  if (playoff_teams > num_teams)
+    return toast(`A ${num_teams}-team league can't send ${playoff_teams} teams to the playoffs — pick a smaller playoff.`, true);
   const roster = collectRosterForm('cl');
   if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
     return toast('Your roster needs at least one starting spot!', true);
@@ -581,7 +586,7 @@ async function handleJoinLeague(e) {
 function backToHub() { enterHub(); }
 
 // ---------- league loading ----------
-function regularWeeks(l) { return l.playoff_teams === 6 ? FANTASY_WEEKS - 3 : FANTASY_WEEKS - 2; }
+function regularWeeks(l) { return l.playoff_teams === 6 ? FANTASY_WEEKS - 3 : l.playoff_teams === 4 ? FANTASY_WEEKS - 2 : FANTASY_WEEKS - 1; }
 function playoffWeeks(l) {
   const start = regularWeeks(l) + 1;
   return Array.from({ length: FANTASY_WEEKS - regularWeeks(l) }, (_, i) => start + i);
@@ -1643,7 +1648,7 @@ async function computeBracket() {
     ] };
     fin.games.forEach((g) => { g.winner = (g.a && g.b) ? winnerOf(g, fWeek) : null; });
     rounds.push(qf, sf, fin);
-  } else {
+  } else if (league.playoff_teams === 4) {
     const sfWeek = reg + 1, fWeek = reg + 2;
     const sf = { week: sfWeek, name: 'Semifinals', games: [
       { a: S(1), b: S(4) }, { a: S(2), b: S(3) },
@@ -1654,6 +1659,11 @@ async function computeBracket() {
     ] };
     fin.games.forEach((g) => { g.winner = (g.a && g.b) ? winnerOf(g, fWeek) : null; });
     rounds.push(sf, fin);
+  } else {
+    const fWeek = reg + 1;
+    const fin = { week: fWeek, name: '🏆 Championship', games: [{ a: S(1), b: S(2) }] };
+    fin.games.forEach((g) => { g.winner = (g.a && g.b) ? winnerOf(g, fWeek) : null; });
+    rounds.push(fin);
   }
   const champ = rounds[rounds.length - 1].games[0].winner || null;
   return { seeds, rounds, regDone, champ };
@@ -1744,11 +1754,82 @@ function startDraftPoll() {
     // If the last picker's client dropped before finalizing, anyone finishes the job
     if (draftPicks.length >= teams.length * draftRounds()) { await finalizeDraft(); return; }
     if (draftPicks.length !== before) renderDraftTab();
+    await maybeCpuPick();
   }, 3000);
 }
 
 const draftOrder = () => [...teams].sort((a, b) => (a.draft_pos || 99) - (b.draft_pos || 99));
 const draftRounds = () => rosterSize(league);
+
+// ---- CPU teams: fill open spots so a league can be tested (or played) solo ----
+const CPU_TEAM_NAMES = ['Circuit Breakers', 'Robo Rushers', 'Data Dawgs', 'Silicon Stampede',
+  'Neural Knights', 'Binary Blitz', 'Auto Audibles', 'Machine Maulers', 'Turing Titans',
+  'Cache Money', 'Logic Bombs', 'Packet Pushers', 'Kernel Krushers', 'Bot Brigade', 'Glitch Mob'];
+const isCpuOwner = (ownerId) =>
+  (ownersCache || []).some((o) => o.id === ownerId && (o.username || '').startsWith('cpu_'));
+const leagueHasCpu = () => teams.some((t) => isCpuOwner(t.owner_id));
+
+async function addCpuTeams() {
+  if (!isCommish() || league.status !== 'pre_draft') return;
+  const need = league.num_teams - teams.length;
+  if (need <= 0) return;
+  toast(`Adding ${need} CPU team${need > 1 ? 's' : ''}… 🤖`);
+  const abbrs = Object.keys(TEAMS);
+  const names = [...CPU_TEAM_NAMES].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < need; i++) {
+    const tag = Math.random().toString(36).slice(2, 8);
+    const { data: bot, error } = await sb.from('ff_players').insert({
+      name: `CPU Coach ${tag.slice(0, 3).toUpperCase()}`,
+      username: `cpu_${tag}`,
+      email: `cpu_${tag}@gridirongm.local`,
+      age_range: '25–34',
+      favorite_team: abbrs[Math.floor(Math.random() * abbrs.length)],
+      avatar: '🤖',
+    }).select().single();
+    if (error) return toast(error.message, true);
+    const { error: e2 } = await sb.from('ff_teams')
+      .insert({ league_id: league.id, owner_id: bot.id, name: names[i % names.length] });
+    if (e2) return toast(e2.message, true);
+  }
+  await loadLeague(league.id);
+  await loadOwners();
+  renderDraftTab();
+  toast(`League filled — ${need} CPU team${need > 1 ? 's' : ''} joined 🤖`);
+}
+
+// The commissioner's open draft room drafts for CPU teams: best fit for
+// unfilled starting spots first, then depth at the skill positions.
+function cpuChoosePlayer(teamId) {
+  const drafted = new Set(draftPicks.map((p) => p.nfl_player_id));
+  const have = draftPicks.filter((p) => p.team_id === teamId)
+    .map((p) => nflPlayers.get(p.nfl_player_id)).filter(Boolean);
+  const r = leagueRoster(league);
+  const count = (pos) => have.filter((p) => p.position === pos).length;
+  const needs = ['RB', 'WR', 'QB', 'TE', 'K', 'DST'].filter((pos) => count(pos) < (Number(r[pos]) || 0));
+  const pool = [...nflPlayers.values()].filter((p) => !drafted.has(p.id) && p.team);
+  let cands = needs.length
+    ? pool.filter((p) => p.position === needs[0])
+    : pool.filter((p) => ['QB', 'RB', 'WR', 'TE'].includes(p.position));
+  if (!cands.length) cands = pool;
+  return cands.length ? cands[Math.floor(Math.random() * cands.length)] : null;
+}
+
+async function maybeCpuPick() {
+  if (!league || league.status !== 'drafting' || !isCommish()) return;
+  const clock = onClockTeam();
+  if (!clock || !isCpuOwner(clock.owner_id)) return;
+  const pick = cpuChoosePlayer(clock.id);
+  if (!pick) return;
+  const overall = draftPicks.length + 1;
+  const { data, error } = await sb.from('ff_draft_picks').insert({
+    league_id: league.id, overall, team_id: clock.id, nfl_player_id: pick.id,
+  }).select().single();
+  if (error) return; // collision — the next poll tick resolves it
+  draftPicks.push(data);
+  toast(`🤖 ${clock.name} picks ${pick.name}`);
+  if (draftPicks.length >= teams.length * draftRounds()) { await finalizeDraft(); return; }
+  renderDraftTab();
+}
 
 function onClockTeam() {
   const order = draftOrder();
@@ -1786,6 +1867,8 @@ function renderDraftTab() {
           <td>${esc(ownerName(t))}</td></tr>`).join('')}
       </tbody></table>
       ${isCommish() ? `
+        ${full ? '' : `<p style="margin-top:14px"><button class="btn-small purple" onclick="addCpuTeams()">🤖 Fill the ${league.num_teams - teams.length} open spot${league.num_teams - teams.length > 1 ? 's' : ''} with CPU teams</button>
+          <span class="hint" style="font-size:12px"> — great for testing; they autopick in the draft and never touch their lineup.</span></p>`}
         <button class="btn-primary" ${full ? '' : 'disabled'} onclick="startDraft()">
           🚀 Start the Draft ${full ? '' : `(need ${league.num_teams - teams.length} more team${league.num_teams - teams.length > 1 ? 's' : ''})`}</button>
         <p class="form-note">Starting the draft randomizes the snake order and assigns divisions. ${draftRounds()} rounds — ${starterCount(league)} starters + ${Number(leagueRoster(league).BN) || 0} bench.</p>`
@@ -1804,7 +1887,7 @@ function renderDraftTab() {
       <div class="on-clock ${myTurn ? 'my-turn' : ''}">
         <div><div class="oc-label">Round ${round} · Pick ${overall} of ${order.length * draftRounds()}</div>
           <div class="oc-team">${myTurn ? '🎉 YOU\'RE ON THE CLOCK!' : `On the clock: ${esc(clock?.name || '…')} (${esc(ownerName(clock))})`}</div></div>
-        <div class="oc-label">Snake order: ${order.map((t) => esc(t.name.split(' ')[0])).join(' → ')}</div>
+        <div class="oc-label">Snake order: ${order.map((t) => esc(t.name.split(' ')[0])).join(' → ')}${leagueHasCpu() ? '<br>🤖 CPU teams autopick while the commissioner has this room open' : ''}</div>
       </div>
       <div class="draft-grid">
         <div class="panel">
@@ -1931,6 +2014,7 @@ async function draftPlayer(pid) {
   toast(`Pick ${overall}: ${nflPlayers.get(pid)?.name} ✓`);
   if (draftPicks.length >= teams.length * draftRounds()) await finalizeDraft();
   renderDraftTab();
+  setTimeout(maybeCpuPick, 1200);
 }
 
 async function finalizeDraft() {

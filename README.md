@@ -30,6 +30,7 @@ Scoring math for a subbed slot: `out_points_at_swap + (in_player_final − in_po
   - 6-team playoffs: regular season weeks 1–14, quarterfinals W15 (top 2 seeds bye), semis W16, championship W17.
   - 4-team playoffs: regular season weeks 1–15, semis W16, championship W17.
   - Division winners qualify first (best record, then points for), wildcards fill the rest.
+- **Test it solo (or play the machines)**: leagues can be as small as **2 teams**, and the commissioner can **fill open spots with CPU teams** 🤖. CPU teams autopick in the draft (filling their starting spots first) while the commissioner has the draft room open, and never touch their lineups afterward — perfect for trying the draft room, matchups, and live coaching without rounding up friends.
 - **Live snake draft** at the scheduled date: commissioner starts it, order is randomized, 15 rounds (9 starters + 6 bench), the board updates live for everyone.
 - **Rosters/lineups**: QB, 2 RB, 2 WR, TE, FLEX (RB/WR/TE), K, D/ST + 6 bench. Weekly head-to-head matchups on a round-robin schedule; standings, playoff bracket, and a league champion.
 - **Free agency**: add/drop any unowned player (with a drop prompt when your roster is full).
