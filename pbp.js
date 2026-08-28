@@ -83,18 +83,23 @@
   function nameKey(s) {
     return String(s || '').toLowerCase().replace(/[^a-z\-'. ]/g, '').trim();
   }
-  // "Patrick Mahomes" -> ["p.mahomes", "patrick mahomes", "mahomes"]
+  // "Patrick Mahomes" -> ["p.mahomes", "pa.mahomes", "pat.mahomes",
+  // "patrick mahomes", "mahomes"] — ESPN disambiguates shared initials with
+  // longer prefixes (Ty.Johnson, Mi.Wilson, Cas.Washington). The bare
+  // surname must stay LAST: buildMatcher drops it on surname collisions.
   function patternsFor(fullName) {
     const clean = String(fullName || '').replace(/\s+(jr\.?|sr\.?|ii|iii|iv|v)$/i, '').trim();
     const parts = clean.split(/\s+/);
     if (parts.length < 2) return [nameKey(clean)];
     const first = parts[0];
     const last = parts.slice(1).join(' ');
-    return [
-      nameKey(`${first[0]}.${last}`),
-      nameKey(clean),
-      nameKey(last),
-    ];
+    const pats = [];
+    for (const n of [1, 2, 3]) {
+      if (first.length >= n) pats.push(nameKey(`${first.slice(0, n)}.${last}`));
+    }
+    pats.push(nameKey(clean));
+    pats.push(nameKey(last));
+    return [...new Set(pats)];
   }
 
   // Build a matcher from summary.boxscore.players so reconstruction uses
@@ -115,11 +120,13 @@
     // last-name-only patterns are ambiguous when two players share a surname
     const lastCounts = {};
     for (const e of entries) {
-      const last = e.patterns[2];
+      const last = e.patterns[e.patterns.length - 1];
       lastCounts[last] = (lastCounts[last] || 0) + 1;
     }
     for (const e of entries) {
-      if (lastCounts[e.patterns[2]] > 1) e.patterns = e.patterns.slice(0, 2);
+      if (e.patterns.length > 1 && lastCounts[e.patterns[e.patterns.length - 1]] > 1) {
+        e.patterns = e.patterns.slice(0, -1);
+      }
     }
     return entries;
   }
@@ -174,8 +181,14 @@
   // dedupe key so a TD recorded both as a normal play and as a
   // scoring-summary line is credited once
   const tdKey = (play, id) => `${play.period?.number}:${play.clock?.displayValue}:${id}`;
-  // scoring-summary-format line ("<Scorer> 13 Yd pass from <Passer>")
-  const isSummaryLine = (pl) => /\d+\s*yd (?:pass from|run\b|rush\b)/i.test(String(pl.text || ''));
+  // scoring-summary-format line ("<Scorer> 13 Yd pass from <Passer>",
+  // "Cam Little 47 Yd Field Goal") — settled AFTER normal plays so the
+  // dedupe never depends on feed ordering
+  const isSummaryLine = (pl) => {
+    const t = String(pl.text || '');
+    return /\d+\s*yd (?:pass from|run\b|rush\b)/i.test(t)
+      || (/\d+\s*(?:yd|yard) field goal/i.test(t) && !/is good|no good|blocked|missed|wide/i.test(t));
+  };
 
   // Returns a branch label describing how the play was classified — used by
   // tracePlays() for diagnostics; reconstructAt() ignores it.
@@ -188,6 +201,11 @@
     const offense = play._offense || null;
     const low = text.toLowerCase();
 
+    // administrative prefix "<OL> reported in as eligible." — the names in it
+    // are not the ball-carrier; parse only what follows the last occurrence
+    const elig = low.lastIndexOf('reported in as eligible.');
+    if (elig >= 0) return creditText(text.slice(elig + 24), play, entries, acc, ctx);
+
     // a two-point attempt never counts, but the TD before it in the same
     // text does — truncate and recurse on the part before the marker
     const tpIdx = (() => { const i = low.indexOf('two-point'); return i >= 0 ? i : low.indexOf('two point'); })();
@@ -195,6 +213,12 @@
       const base = text.slice(0, tpIdx).replace(/\(\s*$/, '');
       if (!base.trim()) return 'two-point';
       return (creditText(base, play, entries, acc, ctx) || 'two-point') + '~2pt-dropped';
+    }
+    // replay review overturned the call: only the text AFTER the last
+    // "REVERSED." describes what actually happened ("Upheld" is untouched)
+    const rev = low.lastIndexOf('reversed.');
+    if (rev >= 0 && text.slice(rev + 9).trim()) {
+      return (creditText(text.slice(rev + 9), play, entries, acc, ctx) || 'other') + '~reversed';
     }
     if (/no play/i.test(low)) return 'no-play';            // nullified by penalty
     if (/spiked the ball/.test(low)) return 'spike';
@@ -261,9 +285,19 @@
       const kicker = matchEnding(entries, key.slice(0, fgAt)) || firstMatch(entries, key, 0, offense);
       const dist = (low.match(/(\d+)\s*(?:yard|yd) field goal/) || [])[1];
       if (!kicker) return 'fg-nokicker';
+      // scoring-summary form ("Cam Little 47 Yd Field Goal") has no verdict
+      // text — scoring plays only list makes, so it IS a make
+      const summaryForm = !/is good|no good|blocked|missed|wide/.test(low)
+        && /(?:yard|yd) field goal\s*\.?\s*$/.test(low);
+      const made = /is good/.test(low) || summaryForm;
+      if (made && ctx) {
+        const dk = tdKey(play, kicker.id) + ':fg';
+        if (ctx.td.has(dk)) return 'fg-dup';
+        ctx.td.add(dk);
+      }
       const k = get(kicker.id);
       k.fgAtt++;
-      if (/is good/.test(low)) {
+      if (made) {
         k.fgMade++;
         const d = Number(dist) || 0;
         if (d >= 50) k.fgBonus += 2; else if (d >= 40) k.fgBonus += 1;
@@ -279,16 +313,29 @@
       if (/is good/.test(low)) k.xpMade++;
       return 'xp';
     }
-    if (/kicks|punts|kickoff|punt/.test(low) && !/pass|rush|left|right|middle|scrambles/.test(low)) return 'kick';
+    // kicks and punts (word-boundaried: "R.Wright" must not match "right").
+    // Returns carry no offensive stats, but a returner's lost fumble or muff
+    // does count against them.
+    if (/\b(kicks|punts|kickoff|punt)\b/.test(low) && !/\b(pass|rush|rushes|left|right|middle|scrambles)\b/.test(low)) {
+      if (/fumbles|muffs/.test(low)) {
+        const km = key.search(/\b(?:kicks|punts)\b/);
+        const returner = firstMatch(entries, key, km >= 0 ? km + 6 : 0, null);
+        if (returner) fumbleCheck(low, key, entries, acc, returner.id, offense);
+      }
+      return 'kick';
+    }
 
-    // passes
+    // passes — the passer is the name immediately before " pass ", the
+    // receiver follows the first " to " AFTER it (a botched-snap preamble
+    // like "C.Humphrey ... recovered by KC-P.Mahomes" must not be matched)
     if (/ pass /.test(low) || /^(\(.*?\)\s*)?\S+.*? pass(ed)? /.test(low)) {
-      const passer = firstMatch(entries, key, 0, offense);
+      const kp = key.indexOf(' pass ');
+      const passer = (kp > 0 ? matchEnding(entries, key.slice(0, kp)) : null) || firstMatch(entries, key, 0, offense);
       if (!passer) return 'pass-no-passer';
       const p = get(passer.id);
       if (/intercepted/.test(low)) { p.passAtt++; p.passInt++; return 'pass-int'; }
       if (/incomplete/.test(low)) { p.passAtt++; return 'pass-incomplete'; }
-      const toIdx = key.indexOf(' to ');
+      const toIdx = key.indexOf(' to ', kp >= 0 ? kp : 0);
       const receiver = toIdx >= 0 ? firstMatch(entries, key, toIdx + 4, offense) : null;
       const yds = ydsMatch();
       if (yds == null) { // completed but yardage not parseable (rare)
@@ -296,21 +343,44 @@
         return 'pass-no-yds';
       }
       p.passAtt++; p.passComp++; p.passYds += yds;
-      if (td) p.passTD++;
+      let carrier = receiver ? receiver.id : passer.id;
+      let scorer = receiver;
       if (receiver) {
         const r = get(receiver.id);
         r.rec++; r.recYds += yds;
-        if (td) { r.recTD++; if (ctx) ctx.td.add(tdKey(play, receiver.id)); }
       }
-      fumbleCheck(low, key, entries, acc, receiver ? receiver.id : passer.id, offense);
+      // laterals: each "Lateral to <X> ... for N yards" adds N to the
+      // passer's passing yards and X's receiving yards (no extra reception);
+      // the TD and any fumble belong to the FINAL carrier
+      if (/ lateral to /.test(low)) {
+        for (const seg of text.split(/lateral to /i).slice(1)) {
+          const lm = firstMatch(entries, nameKey(seg), 0, offense);
+          const ym = seg.toLowerCase().match(/for (-?\d+) (?:yards?|yds?)\b/);
+          if (lm && ym) {
+            const y2 = Number(ym[1]);
+            p.passYds += y2;
+            get(lm.id).recYds += y2;
+            carrier = lm.id;
+            scorer = lm;
+          }
+        }
+      }
+      if (td) {
+        p.passTD++;
+        if (scorer) {
+          get(scorer.id).recTD++;
+          if (ctx) ctx.td.add(tdKey(play, scorer.id));
+        }
+      }
+      fumbleCheck(low, key, entries, acc, carrier, offense);
       return receiver ? 'pass' : 'pass-no-receiver';
     }
 
     // sacks: no fantasy-relevant offense stats in our model
     if (/sacked/.test(low)) { fumbleCheck(low, key, entries, acc, null, offense); return 'sack'; }
 
-    // rushes (incl. scrambles and kneels)
-    if (/(left|right|middle|end|guard|tackle|scrambles|kneels|up the middle)/.test(low)) {
+    // rushes (incl. scrambles and kneels; word-boundaried keywords)
+    if (/\b(left|right|middle|end|guard|tackle|scrambles?|kneels?|rush|rushes|rushed)\b/.test(low)) {
       const rusher = firstMatch(entries, key, 0, offense);
       const yds = ydsMatch();
       if (!rusher || yds == null) return !rusher ? 'rush-no-rusher' : 'rush-no-yds';
@@ -337,7 +407,7 @@
   }
 
   function fumbleCheck(low, key, entries, acc, carrierId, offense) {
-    if (!/fumbles/.test(low)) return;
+    if (!/fumbles|muffs/.test(low)) return;
     const found = carrierId ? { id: carrierId } : firstMatch(entries, key, 0, offense);
     const who = found && entries.find((e) => e.id === found.id);
     if (!who) return;
