@@ -149,6 +149,9 @@ let draftClockTimer = null;
 let preDraftTimer = null;
 let liveTimer = null;
 let byeWeeks = null;       // NFL team -> bye week (from the season schedule)
+let coachRecs = [];        // my team's ff_coach_recs (all weeks, this league)
+let statHistory = {};      // pid -> [{t, pts, touches}] in-session workload trend
+let lastAlertAt = 0;       // coach alert cooldown
 let lastAutoOverall = 0;   // guards double auto-picks when the clock expires
 let preTickCount = 0;
 const statsSyncAt = {};    // week -> last sync ts
@@ -646,6 +649,12 @@ async function loadLeague(id) {
   matchupsAll = mu.data || [];
   swapsAll = sw.data || [];
   $('league-title').textContent = league.name;
+  const mine = teams.find((t) => t.owner_id === me.id);
+  if (mine) {
+    const { data: cr } = await sb.from('ff_coach_recs').select('*')
+      .eq('team_id', mine.id).order('created_at');
+    coachRecs = cr || [];
+  } else coachRecs = [];
 }
 
 // ---------- NFL player pool (ESPN rosters) ----------
@@ -1142,6 +1151,7 @@ async function renderTeamTab() {
   }).join('') || '<p class="empty-note">No bench players.</p>';
 
   el.innerHTML = `
+    <div id="coach-strip"></div>
     <div class="lineup-grid">
       <div class="panel">
         <div class="standings-head">
@@ -1158,6 +1168,7 @@ async function renderTeamTab() {
         ${benchRows}
       </div>
     </div>`;
+  runCoachEngine('team');
 }
 
 function gameMetaHtml(p, week) {
@@ -1312,7 +1323,7 @@ function liveSubCandidates(slot) {
   });
 }
 
-function openLiveSub(slot) {
+function openLiveSub(slot, recommendedPid = null) {
   const mine = myTeam();
   const week = selectedWeek;
   const lr = lineupRow(mine.id, week, slot);
@@ -1320,7 +1331,11 @@ function openLiveSub(slot) {
   if (!outP) return;
   const ev = teamEvent(outP.team, week);
   if (!ev || ev.state !== 'in') return toast('Live subs only while that player\'s game is live.', true);
-  const candidates = liveSubCandidates(slot);
+  let candidates = liveSubCandidates(slot);
+  if (recommendedPid) {
+    candidates = [...candidates].sort((a, b) =>
+      (b.id === recommendedPid ? 1 : 0) - (a.id === recommendedPid ? 1 : 0));
+  }
   const outPts = playerPts(outP.id, week);
   openModal(`
     <div class="modal-head"><h3>🎧 Live Coaching — sub out ${slotLabel(slot, league)}</h3>
@@ -1336,10 +1351,11 @@ function openLiveSub(slot) {
         const liveNote = pev.state === 'in'
           ? `already playing — his current ${fmtPts(now)} pts won't count, only points from now on`
           : `hasn't kicked off — you'll get everything he scores`;
-        return `<div class="slot-row" onclick="confirmLiveSub('${slot}','${p.id}')">
+        const isRec = p.id === recommendedPid;
+        return `<div class="slot-row ${isRec ? 'coach-pick' : ''}" onclick="confirmLiveSub('${slot}','${p.id}')">
           <img class="headshot" src="${esc(p.headshot || '')}" alt="" onerror="this.style.visibility='hidden'"/>
           <div class="p-info">
-            <div class="p-name">${esc(p.name)} <span class="pos-badge pos-${p.position}">${p.position}</span></div>
+            <div class="p-name">${esc(p.name)} ${isRec ? '<span class="coach-pick-tag">🎧 Coach\'s pick</span>' : ''} <span class="pos-badge pos-${p.position}">${p.position}</span></div>
             <div class="p-meta">${gameMetaHtml(p, week)} · <b style="color:var(--purple)">${liveNote}</b></div>
           </div></div>`;
       }).join('') || '<p class="empty-note">No eligible bench player — you can\'t sit a player without a replacement.</p>'}
@@ -1417,7 +1433,7 @@ async function renderMatchupTab() {
   const featured = myPair ? renderFeaturedMatchup(myPair, selectedWeek)
     : `<div class="panel"><p class="empty-note">${selectedWeek > reg ? 'You\'re not in this playoff round.' : 'No matchup for your team this week.'}</p></div>`;
 
-  el.innerHTML = `${featured}
+  el.innerHTML = `<div id="coach-dock"></div>${featured}
     ${otherPairs.length ? `<div class="panel" style="margin-top:16px"><h3>${esc(title)}</h3>
       <div class="mu-list">${otherPairs.map(([a, b]) => {
         const ta = teams.find((t) => t.id === a), tb = teams.find((t) => t.id === b);
@@ -1425,6 +1441,7 @@ async function renderMatchupTab() {
           <span class="sc">${fmtPts(teamWeekScore(a, selectedWeek))} — ${fmtPts(teamWeekScore(b, selectedWeek))}</span>
           <span>${esc(tb?.name)}</span></div>`;
       }).join('')}</div></div>` : ''}`;
+  runCoachEngine('matchup');
 }
 
 function renderFeaturedMatchup([aId, bId], week) {
@@ -1988,20 +2005,21 @@ function coachRecommend() {
     if (!bestAt[p.position]) bestAt[p.position] = p;
     else if (!secondAt[p.position]) secondAt[p.position] = p;
   }
+  const pol = myCoach().policy.draft;
   return avail.slice(0, 60).map((p) => {
-    let score = 300 - Math.min(playerRank(p), 300);
+    let score = (300 - Math.min(playerRank(p), 300)) * pol.valueWeight;
     const why = [];
     if (['K', 'DST'].includes(p.position)) {
       if (picksLeft <= mustFill + 1 && need[p.position] > 0) {
         score += 500; why.push(`you still need a ${p.position === 'K' ? 'kicker' : 'defense'} and picks are running out`);
       } else score -= 500;
     } else if (need[p.position] > 0) {
-      score += 40; why.push(`fills your open ${p.position} spot`);
+      score += pol.needBonus; why.push(`fills your open ${p.position} spot`);
     }
     if (bestAt[p.position] === p && secondAt[p.position]) {
       const drop = playerRank(secondAt[p.position]) - playerRank(p);
       if (drop >= 12 && playerRank(p) < 900) {
-        score += Math.min(drop, 30);
+        score += Math.min(drop, 30) * pol.dropoffWeight;
         why.push(`big drop-off after him — the next ${p.position} is ~${Math.round(drop)} spots later`);
       }
     }
@@ -2018,10 +2036,11 @@ function renderCoachCall() {
   const clock = onClockTeam();
   const myTurn = clock && clock.owner_id === me.id;
   const [top, ...alts] = recs;
+  window._lastDraftRecPid = recs[0]?.p.id || null;
   box.innerHTML = `<div class="coach-call">
     <svg class="coach-mid"><use href="#coach"/></svg>
     <div class="cc-body">
-      <div class="cc-label">🎧 Coach's Call ${myTurn ? '— you\'re on the clock' : '— for your next pick'}</div>
+      <div class="cc-label">${myCoach().icon} ${esc(myCoach().name)}'s Call ${myTurn ? '— you\'re on the clock' : '— for your next pick'}</div>
       <div class="cc-pick"><b>${esc(top.p.name)}</b>
         <span class="pos-badge pos-${top.p.position}">${posRankLabel(top.p)}</span>
         <span class="cc-rank">${fmtRank(top.p)} overall</span></div>
@@ -2299,6 +2318,7 @@ async function draftPlayer(pid) {
   }
   draftPicks.push(data);
   toast(`Pick ${overall}: ${nflPlayers.get(pid)?.name} ✓`);
+  logDraftDecision(overall, pid);
   if (draftPicks.length >= teams.length * draftRounds()) await finalizeDraft();
   renderDraftTab();
   setTimeout(maybeCpuPick, 1200);
@@ -2442,6 +2462,580 @@ function toast(msg, isError = false) {
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
+}
+
+
+/* ==================================================================
+   COACH ENGINE v1a
+   Four layers: Situation Model -> Signal Detectors -> Personality
+   Policy -> Voice + Ledger. Decisions are 100% deterministic; the
+   personality lives in thresholds and phrasing. The engine NEVER
+   writes ff_swaps — accepting a sub routes into the existing
+   openLiveSub()/confirmLiveSub() flow, which re-validates everything.
+   ================================================================== */
+
+// ---- coach registry: a coach is config + phrases, never code ----
+const COACHES = {
+  grit: {
+    key: 'grit', name: 'Coach Grit', icon: '⚡',
+    tagline: 'Aggressive · gut + numbers',
+    blurb: 'Tough, direct, bold. Higher tolerance for volatility and upside. Makes the call early.',
+    policy: {
+      underperformFactor: 0.55,  // "underperforming" = below 55% of expected pace
+      subGainMin: 2.0,           // projected rest-of-game gain needed to call a sub
+      subGainMinTrailing: 1.0,   // looser when trailing by 8+
+      speakConfidence: 0.45,     // speaks earlier
+      holdFloorProb: 0.38,       // will say "don't panic" down to a near toss-up
+      startGainMin: 2.0,
+      draft: { needBonus: 40, dropoffWeight: 1.0, valueWeight: 1.0 },
+    },
+  },
+  analyst: {
+    key: 'analyst', name: 'The Analyst', icon: '📊',
+    tagline: 'Data-first · expected value',
+    blurb: 'Probability, projections and risk-adjusted decisions. Speaks only when the numbers are clear.',
+    policy: {
+      underperformFactor: 0.45,
+      subGainMin: 3.0,
+      subGainMinTrailing: 2.2,
+      speakConfidence: 0.65,
+      holdFloorProb: 0.45,
+      startGainMin: 3.0,
+      draft: { needBonus: 30, dropoffWeight: 1.4, valueWeight: 1.1 },
+    },
+  },
+};
+function myCoach() {
+  const t = myTeam();
+  return COACHES[(t && t.coach) || 'grit'] || COACHES.grit;
+}
+const surname = () => {
+  const parts = (me?.name || 'Coach').trim().split(/\s+/);
+  return parts[parts.length - 1];
+};
+
+// ---- probability bands (user-facing; raw winProb stays internal) ----
+function probBand(wp) {
+  if (wp >= 0.78) return 'Strong Favorite';
+  if (wp >= 0.60) return 'Favored';
+  if (wp >= 0.40) return 'Toss-Up';
+  if (wp >= 0.22) return 'Underdog';
+  return 'Long Shot';
+}
+
+// ---- game clock: "10:38 - 3rd" etc -> fraction of game remaining ----
+function gameFracRemaining(ev) {
+  if (!ev) return 1;
+  if (ev.completed) return 0;
+  if (ev.state === 'pre') return 1;
+  const d = ev.detail || '';
+  if (/half/i.test(d)) return 0.5;
+  if (/^OT|overtime/i.test(d)) return 0.04;
+  let m = d.match(/end.*?(1st|2nd|3rd|4th)/i);
+  if (m) return Math.max(0, 1 - { '1st': 1, '2nd': 2, '3rd': 3, '4th': 4 }[m[1].toLowerCase()] * 0.25);
+  m = d.match(/(\d{1,2}):(\d{2})\s*-\s*(1st|2nd|3rd|4th)/i);
+  if (m) {
+    const q = { '1st': 1, '2nd': 2, '3rd': 3, '4th': 4 }[m[3].toLowerCase()];
+    const minLeftInQ = Number(m[1]) + Number(m[2]) / 60;
+    return Math.max(0, ((q ? (4 - q) : 0) * 15 + minLeftInQ) / 60);
+  }
+  return 0.5; // live but unparseable — assume midgame
+}
+
+// ---- deterministic projections: expert rank -> baseline points/game ----
+const BASELINES = {
+  QB: [[6, 20], [12, 17], [18, 14], [24, 12], [Infinity, 9]],
+  RB: [[6, 17], [12, 14], [24, 11], [36, 8.5], [60, 6], [Infinity, 4]],
+  WR: [[6, 17], [12, 14.5], [24, 12], [36, 9.5], [60, 7], [Infinity, 4.5]],
+  TE: [[3, 13], [8, 10], [15, 7.5], [Infinity, 5]],
+  K: [[Infinity, 8]], DST: [[Infinity, 7]],
+};
+const PLAYER_SD = { QB: 5, RB: 5.5, WR: 6.5, TE: 5, K: 4.5, DST: 6 };
+function baselinePts(p) {
+  if (!p) return 0;
+  const table = BASELINES[p.position] || [[Infinity, 3]];
+  const pr = p.pos_rank != null ? Number(p.pos_rank)
+    : (['K', 'DST'].includes(p.position) ? 1 : 900);
+  for (const [upto, pts] of table) if (pr <= upto) return pts;
+  return 3;
+}
+function expRemaining(p, week) {
+  if (!p || !p.team) return 0;
+  const ev = teamEvent(p.team, week);
+  if (!ev) return 0; // bye
+  return baselinePts(p) * gameFracRemaining(ev);
+}
+// Normal CDF via Abramowitz–Stegun erf approximation
+function normCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp(-z * z / 2);
+  let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - p : p;
+}
+
+// ---- the situation model: one normalized snapshot of the matchup ----
+function coachOpponentId(week) {
+  const mine = myTeam();
+  if (!mine || week > regularWeeks(league)) return null; // playoffs: solo mode in v1a
+  const m = scheduledMatchup(mine.id, week);
+  if (!m) return null;
+  return m.home_team_id === mine.id ? m.away_team_id : m.home_team_id;
+}
+
+function slotSituation(teamId, week, slot) {
+  const sw = swapFor(teamId, week, slot);
+  const lr = lineupRow(teamId, week, slot);
+  const pid = sw ? sw.in_player_id : (lr && lr.nfl_player_id);
+  const p = pid && nflPlayers.get(pid);
+  const ev = p && p.team ? teamEvent(p.team, week) : null;
+  const frac = gameFracRemaining(ev);
+  return {
+    slot, p, pid: pid || null,
+    pts: slotScore(teamId, week, slot).pts,
+    playerPts: pid ? playerPts(pid, week) : 0,
+    state: !p ? 'empty' : !ev ? 'bye' : ev.completed ? 'post' : ev.state === 'in' ? 'in' : 'pre',
+    frac, expRem: p ? expRemaining(p, week) : 0,
+    locked: pid ? playerLocked(pid, week) : false,
+    swapUsed: !!sw,
+    sd: p ? (PLAYER_SD[p.position] || 5) * Math.sqrt(frac) : 0,
+  };
+}
+
+function teamExpected(teamId, week) {
+  let exp = 0, varSum = 0, remaining = 0;
+  for (const slot of leagueSlots(league)) {
+    const ss = slotSituation(teamId, week, slot);
+    exp += ss.pts + ss.expRem;
+    varSum += ss.sd * ss.sd;
+    if (ss.state === 'in' || ss.state === 'pre') remaining++;
+  }
+  return { exp: exp, sd: Math.sqrt(varSum), remaining };
+}
+
+function buildSituation(week) {
+  const mine = myTeam();
+  if (!mine) return null;
+  const oppId = coachOpponentId(week);
+  const slots = leagueSlots(league).map((slot) => {
+    const ss = slotSituation(mine.id, week, slot);
+    // best eligible replacement for this slot right now
+    let alts = [];
+    if (ss.state === 'in' && !ss.swapUsed) alts = liveSubCandidates(slot);
+    else if (!ss.locked) {
+      const lineup = teamLineup(mine.id, week);
+      const inSlots = new Set(lineup.map((l) => l.nfl_player_id));
+      alts = rosterOf(mine.id).filter((x) =>
+        slotEligible(slot).includes(x.position) && !inSlots.has(x.id) && !playerLocked(x.id, week));
+    }
+    let best = null;
+    for (const a of alts) {
+      const rem = expRemaining(a, week);
+      if (!best || rem > best.expRem) {
+        const aev = teamEvent(a.team, week);
+        best = {
+          p: a, expRem: rem, pts: playerPts(a.id, week),
+          state: !aev ? 'bye' : aev.completed ? 'post' : aev.state === 'in' ? 'in' : 'pre',
+          minsToKick: aev && aev.state === 'pre' ? Math.max(0, Math.round((new Date(aev.date) - Date.now()) / 60000)) : null,
+        };
+      }
+    }
+    return { ...ss, best, gain: best ? best.expRem - ss.expRem : 0 };
+  });
+  const my = teamExpected(mine.id, week);
+  const myPts = teamWeekScore(mine.id, week);
+  let situation = {
+    week, slots, myPts, myExp: my.exp, myRemaining: my.remaining,
+    oppId, oppPts: 0, oppExp: 0, oppRemaining: 0, margin: 0, winProb: null, band: null,
+    anyLive: slots.some((x) => x.state === 'in'),
+  };
+  if (oppId) {
+    const opp = teamExpected(oppId, week);
+    situation.oppPts = teamWeekScore(oppId, week);
+    situation.oppExp = opp.exp;
+    situation.oppRemaining = opp.remaining;
+    situation.margin = Math.round((myPts - situation.oppPts) * 10) / 10;
+    const mu = my.exp - opp.exp;
+    const sd = Math.sqrt(my.sd * my.sd + opp.sd * opp.sd) || 1;
+    situation.winProb = normCdf(mu / sd);
+    situation.band = probBand(situation.winProb);
+  }
+  return situation;
+}
+
+// ---- signal detectors: neutral facts, no opinions ----
+function detectSignals(sit) {
+  const pol = myCoach().policy;
+  const signals = [];
+  const trailingBig = sit.oppId && sit.margin <= -8;
+  for (const ss of sit.slots) {
+    // 1) live sub opportunity
+    if (ss.state === 'in' && !ss.swapUsed && ss.p && ss.best
+        && (ss.best.state === 'in' || ss.best.state === 'pre')) {
+      const elapsed = 1 - ss.frac;
+      const expSoFar = baselinePts(ss.p) * elapsed;
+      const underperforming = elapsed >= 0.4
+        && ss.playerPts < Math.max(pol.underperformFactor * expSoFar, 1)
+        && ss.playerPts < 6;
+      const gainMin = trailingBig ? pol.subGainMinTrailing : pol.subGainMin;
+      if (underperforming && ss.gain >= gainMin) {
+        const confidence = Math.min(0.95,
+          0.35 + ss.gain / 8 + (expSoFar > 0 ? (1 - ss.playerPts / Math.max(expSoFar, 1)) * 0.25 : 0));
+        signals.push({
+          type: 'SUB', slot: ss.slot, out: ss.p, inn: ss.best.p,
+          gain: Math.round(ss.gain * 10) / 10, outPts: ss.playerPts,
+          inPts: ss.best.pts, minsToKick: ss.best.minsToKick,
+          expSoFar: Math.round(expSoFar * 10) / 10, confidence,
+          dedupe: `live:SUB:${ss.slot}:${ss.p.id}:${ss.best.p.id}`,
+        });
+      }
+    }
+    // 2) pregame lineup problems: empty / bye / FA starter
+    if (!ss.locked) {
+      let issue = null;
+      if (ss.state === 'empty' && ss.best) issue = 'empty';
+      else if (ss.state === 'bye') issue = 'bye';
+      else if (ss.p && !ss.p.team) issue = 'fa';
+      if (issue) {
+        signals.push({
+          type: 'FIX', slot: ss.slot, issue, out: ss.p || null, inn: ss.best ? ss.best.p : null,
+          confidence: 0.9, dedupe: `pre:FIX:${ss.slot}:${issue}:${ss.pid || 'none'}`,
+        });
+      }
+      // 3) clearly better bench option before kickoff
+      else if (ss.state === 'pre' && ss.best && ss.best.state === 'pre'
+          && (baselinePts(ss.best.p) - baselinePts(ss.p)) >= pol.startGainMin) {
+        const g = Math.round((baselinePts(ss.best.p) - baselinePts(ss.p)) * 10) / 10;
+        signals.push({
+          type: 'START', slot: ss.slot, out: ss.p, inn: ss.best.p, gain: g,
+          confidence: Math.min(0.9, 0.4 + g / 8),
+          dedupe: `pre:START:${ss.slot}:${ss.best.p.id}`,
+        });
+      }
+    }
+  }
+  // 4) don't panic: trailing but the model likes us
+  if (sit.oppId && sit.anyLive && sit.margin < -3 && !signals.some((x) => x.type === 'SUB')
+      && sit.winProb >= pol.holdFloorProb) {
+    signals.push({
+      type: 'HOLD', deficit: Math.abs(sit.margin), remaining: sit.myRemaining,
+      band: sit.band, confidence: sit.winProb,
+      dedupe: `live:HOLD:${Math.round(sit.margin / 10)}`,
+    });
+  }
+  // 5) protect the lead
+  if (sit.oppId && sit.anyLive && sit.margin > 3 && sit.winProb >= 0.60) {
+    signals.push({
+      type: 'PROTECT', lead: sit.margin, band: sit.band, confidence: sit.winProb,
+      dedupe: `live:PROTECT:${sit.band}`,
+    });
+  }
+  return signals;
+}
+
+// ---- voice: template phrase packs, variant chosen by stable hash ----
+function pickVariant(arr, key) {
+  let h = 0;
+  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return arr[h % arr.length];
+}
+const PHRASES = {
+  grit: {
+    SUB: [
+      (c) => `${surname()}, I've seen enough. ${c.out.name} has ${fmtPts(c.outPts)} points and he's fading. ${c.inLine} I'm making the call: switch him.`,
+      (c) => `We're not dying with ${c.out.name} today — ${fmtPts(c.outPts)} points isn't going to cut it. ${c.inLine} Make the switch.`,
+      (c) => `Gut and numbers agree, ${surname()}: ${c.out.name} isn't your guy today. ${c.inLine} Get him in there.`,
+    ],
+    HOLD: [
+      (c) => `Don't panic, ${surname()}. Down ${fmtPts(c.deficit)}, but you've still got ${c.remaining} player${c.remaining === 1 ? '' : 's'} with football left. We're a ${c.band.toLowerCase()} in my book. Hold the line.`,
+      (c) => `Breathe. ${fmtPts(c.deficit)} down looks worse than it is — ${c.remaining} of your guys haven't finished cooking. Keep the lineup as-is.`,
+    ],
+    PROTECT: [
+      (c) => `You're up ${fmtPts(c.lead)}, ${surname()}. ${c.band}. Don't get cute — we protect this one.`,
+      (c) => `Lead's ours: +${fmtPts(c.lead)} and we're ${c.band.toLowerCase()}. No hero moves. Sit tight.`,
+    ],
+    FIX: [
+      (c) => `${surname()}! Your ${c.slotLabel} spot is ${c.issueText}. Fix it before kickoff — free points are walking out the door.`,
+    ],
+    START: [
+      (c) => `Looking at your ${c.slotLabel}: ${c.inn.name} projects about ${fmtPts(c.gain)} more than ${c.out.name} this week. I'd start him. Your call, ${surname()}.`,
+    ],
+    calm: {
+      'Strong Favorite': (s) => `We're in command, ${surname()}. Stay sharp — I'll bark if anything changes.`,
+      'Favored': () => `We're ahead of this thing. I like our spots.`,
+      'Toss-Up': () => `This one's a street fight. I'm watching every snap.`,
+      'Underdog': () => `They've got the edge — for now. I'm hunting for our move.`,
+      'Long Shot': () => `Long odds. But I've won uglier ones. Eyes open.`,
+      none: () => `I'm on the sideline with you. When there's a call to make, you'll hear it.`,
+    },
+  },
+  analyst: {
+    SUB: [
+      (c) => `${c.out.name} is at ${fmtPts(c.outPts)} vs. ~${fmtPts(c.expSoFar)} expected by this point of the game. ${c.inLine} Projected gain: ${fmtPts(c.gain)}. Expected value favors the substitution — I recommend it.`,
+      (c) => `Pace analysis: ${c.out.name} is tracking well under baseline. ${c.inLine} Risk-adjusted, the switch projects +${fmtPts(c.gain)}. Recommend: substitute.`,
+    ],
+    HOLD: [
+      (c) => `Deficit: ${fmtPts(c.deficit)}. Your remaining players carry more expected production than your opponent's. Model reads this as a ${c.band.toLowerCase()}. No action recommended.`,
+      (c) => `The margin is ${fmtPts(c.deficit)}, but expected points remaining favor holding. Classification: ${c.band}. Recommendation: no change.`,
+    ],
+    PROTECT: [
+      (c) => `Current lead: ${fmtPts(c.lead)}. Model classification: ${c.band}. Variance is your enemy now — recommend no lineup changes.`,
+    ],
+    FIX: [
+      (c) => `Data issue in your lineup: the ${c.slotLabel} slot is ${c.issueText}. Expected value of fixing it is strictly positive.`,
+    ],
+    START: [
+      (c) => `Baseline comparison at ${c.slotLabel}: ${c.inn.name} projects ${fmtPts(c.gain)} higher than ${c.out.name}. Recommend the start.`,
+    ],
+    calm: {
+      'Strong Favorite': () => `Model classification: strong favorite. Monitoring for variance events.`,
+      'Favored': () => `You're favored on expected points. Watching the live data.`,
+      'Toss-Up': () => `This projects as a toss-up. Small edges will decide it — I'm tracking them.`,
+      'Underdog': () => `You're the underdog on current projections. Evaluating upside options.`,
+      'Long Shot': () => `Low win probability band. Looking for high-variance paths back.`,
+      none: () => `Monitoring your roster. Recommendations will surface when the data justifies them.`,
+    },
+  },
+};
+function speakRec(sig) {
+  const coach = myCoach();
+  const pack = PHRASES[coach.key] || PHRASES.grit;
+  const ctx = { ...sig, slotLabel: sig.slot ? slotLabel(sig.slot, league) : '' };
+  if (sig.inn) {
+    ctx.inLine = sig.minsToKick != null
+      ? `${sig.inn.name} kicks off in ${sig.minsToKick >= 60 ? Math.round(sig.minsToKick / 60) + 'h' : sig.minsToKick + ' minutes'} and projects ${fmtPts(sig.gain || 0)} more from here.`
+      : sig.type === 'SUB'
+        ? `${sig.inn.name} is live right now and projects ${fmtPts(sig.gain || 0)} more the rest of the way.`
+        : '';
+  }
+  if (sig.issue) ctx.issueText = { empty: 'empty', bye: 'on a bye week', fa: 'held by a free agent with no team' }[sig.issue];
+  const variants = pack[sig.type] || [(c) => 'I have a recommendation.'];
+  return pickVariant(variants, sig.dedupe)(ctx);
+}
+
+// ---- orchestrator: run on render + live ticks, persist, display ----
+async function runCoachEngine(context) {
+  try {
+    const mine = myTeam();
+    if (!mine || !league || !['active', 'complete'].includes(league.status)) return;
+    if (selectedWeek !== Math.min(currentNflWeek, FANTASY_WEEKS)) { renderCoachSurfaces(null, null); return; }
+    const sit = buildSituation(selectedWeek);
+    if (!sit) return;
+    const signals = detectSignals(sit);
+    const pol = myCoach().policy;
+    // persist any new speak-worthy signal (dedupe handled by unique constraint)
+    for (const sig of signals) {
+      if (sig.confidence < pol.speakConfidence) continue;
+      if (coachRecs.some((r) => r.week === selectedWeek && r.dedupe_key === sig.dedupe)) continue;
+      const row = {
+        league_id: league.id, team_id: mine.id, week: selectedWeek,
+        coach: myCoach().key, phase: sit.anyLive ? 'live' : 'pregame',
+        rec_type: sig.type, slot: sig.slot || null,
+        out_player_id: sig.out ? sig.out.id : null,
+        in_player_id: sig.inn ? sig.inn.id : null,
+        confidence: Math.round(sig.confidence * 100) / 100,
+        projected_delta: sig.gain != null ? sig.gain : null,
+        message: speakRec(sig),
+        situation: {
+          margin: sit.margin, band: sit.band, myPts: sit.myPts, oppPts: sit.oppPts,
+          outPts: sig.outPts ?? null, inPts: sig.inPts ?? null,
+          outPid: sig.out ? sig.out.id : null, inPid: sig.inn ? sig.inn.id : null,
+        },
+        dedupe_key: sig.dedupe,
+      };
+      const { data, error } = await sb.from('ff_coach_recs').insert(row).select().single();
+      if (!error && data) coachRecs.push(data);
+      else if (error && error.code === '23505') { /* another tab beat us */ }
+    }
+    renderCoachSurfaces(sit, context);
+    maybeScoreRecs();
+  } catch (err) { console.warn('coach engine', err); }
+}
+
+function activeAlert() {
+  const week = selectedWeek;
+  const pending = coachRecs.filter((r) => r.week === week && r.decision === 'pending');
+  const prio = { SUB: 5, FIX: 4, START: 3, PROTECT: 2, HOLD: 1 };
+  pending.sort((a, b) => (prio[b.rec_type] || 0) - (prio[a.rec_type] || 0)
+    || new Date(b.created_at) - new Date(a.created_at));
+  return pending[0] || null;
+}
+
+function renderCoachSurfaces(sit, context) {
+  const coach = myCoach();
+  const pack = PHRASES[coach.key] || PHRASES.grit;
+  const alert = sit ? activeAlert() : null;
+  const rec = coachRecordLine();
+  const calm = sit
+    ? (sit.band ? pack.calm[sit.band] : pack.calm.none)(sit)
+    : 'Back to this week for my live read.';
+  const bandChip = sit && sit.band
+    ? `<span class="band-chip">${esc(sit.band)}</span>` : '';
+  const marginLine = sit && sit.oppId
+    ? `${sit.margin > 0 ? 'Up' : sit.margin < 0 ? 'Down' : 'Tied'}${sit.margin ? ' ' + fmtPts(Math.abs(sit.margin)) : ''}` : '';
+
+  const dock = $('coach-dock');
+  if (dock) {
+    dock.innerHTML = `<div class="coach-dock">
+      <img src="assets/coach.png" class="cd-img" alt="" onerror="this.remove()"/>
+      <div class="cd-body">
+        <div class="cd-name">${coach.icon} ${esc(coach.name).toUpperCase()}
+          ${bandChip} ${marginLine ? `<span class="cd-margin">${marginLine}</span>` : ''}
+          ${rec ? `<span class="cd-record" title="Would the coach's calls have gained points? Beta — small sample, treat with care.">${rec} <i>beta</i></span>` : ''}
+          <button class="btn-ghost cd-switch" onclick="openCoachPicker()">Change coach</button></div>
+        ${alert ? renderAlertHtml(alert) : `<div class="cd-calm">"${esc(calm)}"</div>`}
+      </div></div>`;
+  }
+  const strip = $('coach-strip');
+  if (strip) {
+    strip.innerHTML = `<div class="coach-stripe" onclick="${alert ? '' : "showTab('matchup')"}">
+      <img src="assets/coach.png" class="cs-img" alt="" onerror="this.remove()"/>
+      <div class="cs-body"><b>${coach.icon} ${esc(coach.name)}:</b>
+        ${alert ? `<span class="cs-alert">${esc(alert.message)}</span>` : `<span>"${esc(calm)}"</span>`}</div>
+      ${alert ? alertButtonsHtml(alert, true) : '<span class="cs-go">Matchup ›</span>'}
+    </div>`;
+  }
+}
+
+function alertButtonsHtml(r, compact) {
+  const acts = [];
+  if (r.rec_type === 'SUB') acts.push(`<button class="btn-small purple" onclick="acceptCoachRec('${r.id}')">🎧 Make the switch</button>`);
+  else if (r.rec_type === 'FIX' || r.rec_type === 'START') acts.push(`<button class="btn-small purple" onclick="acceptCoachRec('${r.id}')">Fix my lineup</button>`);
+  else acts.push(`<button class="btn-small" onclick="acceptCoachRec('${r.id}')">Got it, coach</button>`);
+  acts.push(`<button class="btn-ghost" onclick="rejectCoachRec('${r.id}')">${compact ? '✕' : 'Ignore coach'}</button>`);
+  return `<span class="alert-btns">${acts.join('')}</span>`;
+}
+
+function renderAlertHtml(r) {
+  return `<div class="cd-alert">
+    <div class="cd-say">"${esc(r.message)}"</div>
+    ${alertButtonsHtml(r, false)}
+  </div>`;
+}
+
+async function decideCoachRec(id, decision) {
+  const r = coachRecs.find((x) => x.id === id);
+  if (!r || r.decision !== 'pending') return null;
+  r.decision = decision;
+  r.decided_at = new Date().toISOString();
+  await sb.from('ff_coach_recs').update({ decision, decided_at: r.decided_at }).eq('id', id);
+  return r;
+}
+
+async function acceptCoachRec(id) {
+  const r = await decideCoachRec(id, 'accepted');
+  if (!r) return;
+  if (r.rec_type === 'SUB') openLiveSub(r.slot, r.in_player_id);
+  else if (r.rec_type === 'FIX' || r.rec_type === 'START') openSlotPicker(r.slot);
+  renderTab();
+}
+async function rejectCoachRec(id) {
+  await decideCoachRec(id, 'rejected');
+  renderTab();
+}
+
+// ---- outcomes: score SUB/HOLD calls once the week is final ----
+// outcome_points = (points if the call had been followed) - (points if not)
+async function maybeScoreRecs() {
+  const mine = myTeam();
+  if (!mine) return;
+  const pendingWeeks = [...new Set(coachRecs
+    .filter((r) => r.outcome_status === 'pending' && ['SUB', 'HOLD'].includes(r.rec_type))
+    .map((r) => r.week))]
+    .filter((w) => w < currentNflWeek || weekComplete(w));
+  for (const w of pendingWeeks) {
+    if (!eventsByWeek[w]) await fetchWeekEvents(w);
+    if (!weekComplete(w)) continue;
+    if (!statsByWeek[w]) await loadStats(w);
+    if ((statsByWeek[w]?.size || 0) === 0) continue;
+    for (const r of coachRecs.filter((x) => x.week === w && x.outcome_status === 'pending')) {
+      let out = null;
+      const snap = r.situation || {};
+      if (r.rec_type === 'SUB' && r.out_player_id && r.in_player_id) {
+        const sw = swapsAll.find((x) => x.team_id === r.team_id && x.week === w && x.slot === r.slot
+          && x.in_player_id === r.in_player_id);
+        const outSnap = sw ? Number(sw.out_points_at_swap) : Number(snap.outPts ?? 0);
+        const inSnap = sw ? Number(sw.in_points_at_swap) : Number(snap.inPts ?? 0);
+        const followed = outSnap + playerPts(r.in_player_id, w) - inSnap;
+        const ignored = playerPts(r.out_player_id, w);
+        out = followed - ignored;
+      } else if (r.rec_type === 'HOLD') {
+        out = 0; // HOLD counterfactuals need the alt snapshot; conservative 0 unless present
+        if (snap.inPid && snap.outPid) {
+          const followed = playerPts(snap.outPid, w);
+          const ignored = Number(snap.outPts ?? 0) + playerPts(snap.inPid, w) - Number(snap.inPts ?? 0);
+          out = followed - ignored;
+        }
+      }
+      const upd = {
+        outcome_status: out == null ? 'n/a' : 'scored',
+        outcome_points: out == null ? null : Math.round(out * 10) / 10,
+      };
+      if (r.decision === 'pending') { upd.decision = 'expired'; r.decision = 'expired'; }
+      await sb.from('ff_coach_recs').update(upd).eq('id', r.id);
+      Object.assign(r, upd);
+    }
+  }
+}
+
+function coachRecordLine() {
+  const scored = coachRecs.filter((r) => r.outcome_status === 'scored' && r.coach === myCoach().key);
+  if (!scored.length) return '';
+  let w = 0, l = 0, pts = 0;
+  for (const r of scored) {
+    const d = Number(r.outcome_points) || 0;
+    pts += d;
+    if (d > 1.5) w++; else if (d < -1.5) l++;
+  }
+  return `${w}–${l} · ${pts >= 0 ? '+' : ''}${fmtPts(pts)} pts if followed`;
+}
+
+// ---- coach picker (per fantasy team) ----
+function openCoachPicker() {
+  const mine = myTeam();
+  if (!mine) return;
+  openModal(`
+    <div class="modal-head"><h3>Choose your coach</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <p class="panel-sub">Same facts, different philosophy. Every coach's calls are deterministic and tracked.</p>
+    <div class="pick-list">
+      ${Object.values(COACHES).map((c) => `
+        <div class="slot-row ${mine.coach === c.key ? 'coach-pick' : ''}" onclick="saveCoach('${c.key}')">
+          <span class="slot-tag">${c.icon}</span>
+          <div class="p-info">
+            <div class="p-name">${esc(c.name)} <span class="cc-rank">${esc(c.tagline)}</span></div>
+            <div class="p-meta">${esc(c.blurb)}</div>
+          </div>
+          ${mine.coach === c.key ? '<span class="lock-badge">Your coach</span>' : ''}
+        </div>`).join('')}
+    </div>`);
+}
+async function saveCoach(key) {
+  const mine = myTeam();
+  if (!mine || !COACHES[key]) return;
+  const { error } = await sb.from('ff_teams').update({ coach: key }).eq('id', mine.id);
+  if (error) return toast(error.message, true);
+  mine.coach = key;
+  closeModal();
+  renderTab();
+  toast(`${COACHES[key].icon} ${COACHES[key].name} is now running your sideline.`);
+}
+
+// draft picks log against the coach's standing recommendation
+async function logDraftDecision(overall, pickedPid) {
+  const mine = myTeam();
+  const recPid = window._lastDraftRecPid;
+  if (!mine || !recPid) return;
+  const row = {
+    league_id: league.id, team_id: mine.id, week: 0, coach: myCoach().key,
+    phase: 'draft', rec_type: 'DRAFT', in_player_id: recPid,
+    decision: pickedPid === recPid ? 'accepted' : 'rejected',
+    decided_at: new Date().toISOString(),
+    message: `Pick ${overall}: recommended ${nflPlayers.get(recPid)?.name || '?'}`,
+    situation: { overall, picked: pickedPid },
+    dedupe_key: `draft:${overall}`, outcome_status: 'n/a',
+  };
+  const { data, error } = await sb.from('ff_coach_recs').insert(row).select().single();
+  if (!error && data) coachRecs.push(data);
 }
 
 init();

@@ -425,6 +425,50 @@ tr.me td { background: rgba(34,197,94,.07); }
 .coach-call .cc-why { font-size: 13px; color: var(--text); }
 .coach-call .cc-alts { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+/* ===== Coach Engine: sideline dock, strip, alerts ===== */
+.coach-dock {
+  display: flex; gap: 16px; align-items: flex-start;
+  border: 1px solid rgba(139,92,246,.5); border-radius: var(--radius);
+  background: linear-gradient(115deg, rgba(124,58,237,.16), rgba(16,16,26,.6));
+  padding: 14px 18px; margin-bottom: 16px;
+}
+.cd-img { width: 74px; height: 74px; object-fit: contain; filter: drop-shadow(0 0 18px rgba(124,58,237,.4)); flex-shrink: 0; }
+.cd-body { flex: 1; min-width: 0; }
+.cd-name {
+  font-family: 'Rajdhani'; font-weight: 700; font-size: 16px; letter-spacing: 2px;
+  color: var(--accent-soft, #c4b5fd); display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.band-chip {
+  font-family: 'Inter'; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  border: 1px solid rgba(215,215,228,.4); color: var(--silver); border-radius: 999px; padding: 2px 10px;
+}
+.cd-margin { font-family: 'Inter'; font-size: 12.5px; color: var(--muted); font-weight: 600; letter-spacing: 0; }
+.cd-record { font-family: 'Inter'; font-size: 12px; color: var(--muted); letter-spacing: 0; font-weight: 600; }
+.cd-record i { color: var(--gold); font-style: normal; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-left: 3px; }
+.cd-switch { margin-left: auto; font-size: 11.5px; padding: 4px 9px; }
+.cd-calm { margin-top: 6px; font-size: 14.5px; color: var(--text); font-style: italic; }
+.cd-alert { margin-top: 8px; }
+.cd-say { font-size: 15px; color: var(--text); margin-bottom: 10px; line-height: 1.5; }
+.alert-btns { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+
+.coach-stripe {
+  display: flex; align-items: center; gap: 12px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-2);
+  padding: 9px 14px; margin-bottom: 14px; font-size: 13.5px;
+}
+.coach-stripe:hover { border-color: rgba(139,92,246,.5); }
+.cs-img { width: 34px; height: 34px; object-fit: contain; flex-shrink: 0; }
+.cs-body { flex: 1; min-width: 0; color: var(--muted); }
+.cs-body b { color: var(--purple); }
+.cs-alert { color: var(--text); }
+.cs-go { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+.slot-row.coach-pick { border-color: rgba(139,92,246,.65); box-shadow: 0 0 0 1px rgba(139,92,246,.35); }
+.coach-pick-tag {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--purple); border: 1px solid rgba(139,92,246,.5); border-radius: 999px; padding: 1px 8px; margin-left: 4px;
+}
+
 /* ===== Toast ===== */
 .toast {
   position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);

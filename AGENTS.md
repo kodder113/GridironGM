@@ -56,6 +56,16 @@ A manager can substitute a starter **mid-game**, like a real coach:
 - **Coach's Call**: heuristic recommender (`coachRecommend()`) — expert value + open starting spots + positional drop-off + "you need a K/DST, picks are running out" timing. Renders top pick with reasons + 2 alternates + draft button.
 - **CPU teams** (testing/solo play): commissioner can fill open spots with bots (`cpu_*` accounts, 🤖). They autopick by rank & roster need **while the commissioner's draft room is open** (poll-driven). Leagues can be as small as 2 teams; playoff option `2` = championship game only.
 
+## Coach Engine (v1a — live AI coach on top of Live Coaching)
+
+Four layers, all client-side and deterministic (see the `COACH ENGINE v1a` section at the bottom of `app.js`):
+1. **Situation model** — `buildSituation(week)`: both lineups with live points, per-slot game state + fraction-of-game-remaining (parsed from ESPN's `"10:38 - 3rd"` detail), rank-derived rest-of-game projections (`BASELINES` table), internal win probability (normal approximation). **User-facing copy uses probability bands only** (Strong Favorite / Favored / Toss-Up / Underdog / Long Shot) — never raw percentages.
+2. **Detectors** — `detectSignals()`: SUB (underperforming live starter + eligible better bench), HOLD (trailing but favored), PROTECT (leading), FIX (empty/bye/free-agent starter pre-kickoff), START (clearly better bench pre-kickoff). Neutral facts only.
+3. **Personality policy** — `COACHES` registry: a coach is config (thresholds) + phrase pack, never code. v1a ships `grit` (aggressive: lower sub threshold, speaks earlier) and `analyst` (EV-only, speaks at high confidence). Grit's "gut" is thresholds, NOT randomness — all decisions deterministic and auditable. Coach choice is **per fantasy team** (`ff_teams.coach`), picker in the sideline dock.
+4. **Voice + ledger** — template phrase packs per coach (variant chosen by stable hash of the dedupe key; surname interpolated). Every speak-worthy rec is persisted to `ff_coach_recs` (unique `(team_id, week, dedupe_key)` = anti-nagging); accept/reject updates `decision`; `maybeScoreRecs()` scores SUB/HOLD outcomes after the week finals as `(points if followed) − (points if not)`, using swap snapshots when the sub actually happened and the rec-time snapshot in `situation` jsonb otherwise. Rejected calls are scored too. Record shown in the dock as `W–L · ±pts if followed` with an explicit **beta** label (win > +1.5, loss < −1.5, else push).
+
+**Safety invariants:** the engine never writes `ff_swaps`; "Make the switch" routes into `openLiveSub(slot, recommendedPid)` (coach's pick highlighted) and the existing confirm flow re-validates + re-snapshots. Eligibility comes from `liveSubCandidates()` itself. Draft `coachRecommend()` is policy-parameterized per coach and draft picks log accepted/rejected vs the standing recommendation (`logDraftDecision`). UI: full dock + alerts on Matchup (`#coach-dock`), compact strip on My Team (`#coach-strip`). v1b (not built): The General + Gunslinger, waiver detector, record cards. Do not start v1b/v2 until v1a is field-tested.
+
 ## Season flow
 
 - Lineups lock per-player at their real kickoff; before that, free slot edits. After kickoff → Live Coaching only.
