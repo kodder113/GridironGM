@@ -117,34 +117,38 @@
         }
       }
     }
-    // last-name-only patterns are ambiguous when two players share a surname
+    // last-name-only patterns are ambiguous only when two players on the
+    // SAME team share the surname — cross-team duplicates are resolved by
+    // the drive's offense at match time
     const lastCounts = {};
     for (const e of entries) {
-      const last = e.patterns[e.patterns.length - 1];
-      lastCounts[last] = (lastCounts[last] || 0) + 1;
+      const k = `${e.team}|${e.patterns[e.patterns.length - 1]}`;
+      lastCounts[k] = (lastCounts[k] || 0) + 1;
     }
     for (const e of entries) {
-      if (e.patterns.length > 1 && lastCounts[e.patterns[e.patterns.length - 1]] > 1) {
-        e.patterns = e.patterns.slice(0, -1);
-      }
+      const k = `${e.team}|${e.patterns[e.patterns.length - 1]}`;
+      if (e.patterns.length > 1 && lastCounts[k] > 1) e.patterns = e.patterns.slice(0, -1);
     }
     return entries;
   }
 
-  // find the athlete whose pattern appears at `textKey.slice(idx)`; ties on
-  // pattern length (e.g. two players sharing "t.etienne") break toward the
-  // team on offense for the play's drive
+  // find the athlete whose pattern appears at `textKey.slice(idx)`. When the
+  // drive's offense is known, ONLY that team's players are candidates — a
+  // ball-carrier, receiver, passer, or kicker is never on defense, and the
+  // defenders named in tackle notes must never match (that is how
+  // "D.Jones (IND QB)" vs "D.J. Jones (DEN DT)" and "M.Brown" with two
+  // Browns in the game get resolved).
   function matchAt(entries, textKey, idx, offense) {
-    const cands = [];
+    let best = null;
     for (const e of entries) {
+      if (offense && e.team !== offense) continue;
       for (const p of e.patterns) {
-        if (textKey.startsWith(p, idx)) cands.push({ e, len: p.length });
+        if (textKey.startsWith(p, idx)) {
+          if (!best || p.length > best.len) best = { id: e.id, len: p.length };
+        }
       }
     }
-    if (!cands.length) return null;
-    cands.sort((a, b) => b.len - a.len
-      || (offense ? (b.e.team === offense) - (a.e.team === offense) : 0));
-    return { id: cands[0].e.id, len: cands[0].len };
+    return best;
   }
   function firstMatch(entries, textKey, fromIdx, offense) {
     for (let i = fromIdx; i < textKey.length; i++) {
@@ -154,12 +158,14 @@
     return null;
   }
   // the athlete whose pattern ENDS the given prefix (name immediately before
-  // a marker like "extra point" / "yard field goal") — avoids grabbing an
-  // unrelated name earlier in the text (penalties, tacklers)
-  function matchEnding(entries, pre) {
+  // a marker like " pass " / "extra point" / "yard field goal") — avoids
+  // grabbing an unrelated name earlier in the text; offense-restricted like
+  // matchAt when the offense is known
+  function matchEnding(entries, pre, offense) {
     const s = String(pre || '').replace(/[\s.]+$/, '');
     let best = null;
     for (const e of entries) {
+      if (offense && e.team !== offense) continue;
       for (const p of e.patterns) {
         if (!s.endsWith(p)) continue;
         const i = s.length - p.length;
@@ -220,7 +226,20 @@
     if (rev >= 0 && text.slice(rev + 9).trim()) {
       return (creditText(text.slice(rev + 9), play, entries, acc, ctx) || 'other') + '~reversed';
     }
-    if (/no play/i.test(low)) return 'no-play';            // nullified by penalty
+    if (/no play/i.test(low)) {
+      // A change of possession can survive a penalty that nullifies the rest
+      // of the play: when the defense recovered a fumble BEFORE the penalty
+      // text, the box score still charges the fumble to the carrier (e.g. a
+      // strip-sack whose return was wiped by a flag).
+      const fi = low.search(/fumbles/);
+      const ri = low.search(/recovered by [a-z]{2,4}-/);
+      const pi = low.search(/penalty/);
+      if (fi >= 0 && ri > fi && (pi < 0 || ri < pi)) {
+        fumbleCheck(low, nameKey(text), entries, acc, null, offense);
+        return 'no-play+fumble';
+      }
+      return 'no-play';            // nullified by penalty
+    }
     if (/spiked the ball/.test(low)) return 'spike';
 
     // `key` (digits stripped) is only for NAME matching; every numeric or
@@ -262,7 +281,7 @@
       p.passAtt++; p.passComp++; p.passYds += yds; p.passTD++;
       const r = get(receiver.id);
       r.rec++; r.recYds += yds; r.recTD++;
-      summaryKick(low, entries, acc);
+      kickTail(low, play, entries, acc, ctx);
       return 'score-summary-pass';
     }
     sm = low.match(/(\d+)\s*yd (?:run|rush)\b/);
@@ -273,7 +292,7 @@
       if (ctx) ctx.td.add(tdKey(play, rusher.id));
       const r = get(rusher.id);
       r.rushAtt++; r.rushYds += Number(sm[1]); r.rushTD++;
-      summaryKick(low, entries, acc);
+      kickTail(low, play, entries, acc, ctx);
       return 'score-summary-rush';
     }
 
@@ -282,7 +301,7 @@
     // player named earlier in the text)
     const fgAt = key.search(/ (?:yard|yd) field goal/);
     if (fgAt >= 0) {
-      const kicker = matchEnding(entries, key.slice(0, fgAt)) || firstMatch(entries, key, 0, offense);
+      const kicker = matchEnding(entries, key.slice(0, fgAt), offense) || firstMatch(entries, key, 0, offense);
       const dist = (low.match(/(\d+)\s*(?:yard|yd) field goal/) || [])[1];
       if (!kicker) return 'fg-nokicker';
       // scoring-summary form ("Cam Little 47 Yd Field Goal") has no verdict
@@ -305,7 +324,7 @@
       return 'fg';
     }
     if (xpIdx >= 0) {
-      const kicker = (xpIdx > 0 && matchEnding(entries, key.slice(0, key.indexOf(' extra point'))))
+      const kicker = (xpIdx > 0 && matchEnding(entries, key.slice(0, key.indexOf(' extra point')), offense))
         || firstMatch(entries, key, 0, offense);
       if (!kicker) return 'xp-nokicker';
       const k = get(kicker.id);
@@ -322,6 +341,9 @@
         const returner = firstMatch(entries, key, km >= 0 ? km + 6 : 0, null);
         if (returner) fumbleCheck(low, key, entries, acc, returner.id, offense);
       }
+      // return-TD summary lines ride the kick branch but still carry a real
+      // extra point in their "(<Kicker> Kick)" tail
+      kickTail(low, play, entries, acc, ctx);
       return 'kick';
     }
 
@@ -330,7 +352,7 @@
     // like "C.Humphrey ... recovered by KC-P.Mahomes" must not be matched)
     if (/ pass /.test(low) || /^(\(.*?\)\s*)?\S+.*? pass(ed)? /.test(low)) {
       const kp = key.indexOf(' pass ');
-      const passer = (kp > 0 ? matchEnding(entries, key.slice(0, kp)) : null) || firstMatch(entries, key, 0, offense);
+      const passer = (kp > 0 ? matchEnding(entries, key.slice(0, kp), offense) : null) || firstMatch(entries, key, 0, offense);
       if (!passer) return 'pass-no-passer';
       const p = get(passer.id);
       if (/intercepted/.test(low)) { p.passAtt++; p.passInt++; return 'pass-int'; }
@@ -391,19 +413,32 @@
       return 'rush';
     }
     // aborted snaps etc.: a fumble can occur on an otherwise unclassified play
-    if (/fumbles/.test(low)) { fumbleCheck(low, key, entries, acc, null, offense); return 'fumble'; }
+    if (/fumbles/.test(low)) {
+      fumbleCheck(low, key, entries, acc, null, offense);
+      kickTail(low, play, entries, acc, ctx);
+      return 'fumble';
+    }
+    // defensive/return TD summary lines ("R.Smith 63 Yd Fumble Return
+    // (T.Loop Kick)") carry no offense stats but a real extra point
+    kickTail(low, play, entries, acc, ctx);
     return 'other';
   }
 
-  // "(<Kicker> Kick)" tail on scoring-summary lines
-  function summaryKick(low, entries, acc) {
+  // "(<Kicker> Kick)" tail on scoring-summary lines — a real extra point.
+  // Not offense-restricted: on a defensive TD the kicker is on the other
+  // side of the drive's offense. Deduped per period+clock+kicker.
+  function kickTail(low, play, entries, acc, ctx) {
     const m = low.match(/\(([a-z\-'. ]+?) kick\)/);
     if (!m) return;
-    const kicker = matchEnding(entries, nameKey(m[1]));
-    if (kicker) {
-      const k = (acc[kicker.id] ||= zero());
-      k.xpAtt++; k.xpMade++;
+    const kicker = matchEnding(entries, nameKey(m[1]), null);
+    if (!kicker) return;
+    if (ctx) {
+      const dk = tdKey(play, kicker.id) + ':xp';
+      if (ctx.td.has(dk)) return;
+      ctx.td.add(dk);
     }
+    const k = (acc[kicker.id] ||= zero());
+    k.xpAtt++; k.xpMade++;
   }
 
   function fumbleCheck(low, key, entries, acc, carrierId, offense) {

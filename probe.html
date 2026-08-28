@@ -256,7 +256,7 @@ function deepDiagnose(summary, box, reconFull) {
         credited: t.credits[id] ? nonzero(t.credits[id]) : null,
         creditedTo: !t.credits[id] && Object.keys(t.credits).length
           ? Object.keys(t.credits).map((x) => (byId[x] || {}).name || x).join(', ') : null,
-        text: String(t.play.text || '').slice(0, 150),
+        text: String(t.play.text || '').slice(0, 260),
       }));
     outliers.push({
       id, name: (box[id] || byId[id] || { name: id }).name, team: (box[id] || {}).team || '?',
@@ -296,7 +296,7 @@ function gameDiagJson(a) {
     errorPtsByCategory: a.deep.catErrAll,
     outliers: a.deep.outliers.slice(0, 12).map(compactOutlier),
     suspiciousUncredited: a.deep.suspicious.slice(0, 15).map((t) =>
-      `[Q${t.play.period?.number} ${t.play.clock?.displayValue}|${t.branch}] ${String(t.play.text || '').slice(0, 150)}`),
+      `[Q${t.play.period?.number} ${t.play.clock?.displayValue}|${t.branch}] ${String(t.play.text || '').slice(0, 260)}`),
   }, null, 1);
 }
 
@@ -398,7 +398,7 @@ function renderGameReport(a) {
     .map(([b, n]) => `<tr><td>${esc(b)}</td><td class="num">${n}</td></tr>`).join('');
   const suspRows = a.deep.suspicious.slice(0, 20).map((t) =>
     `<tr><td>${esc(`Q${t.play.period?.number} ${t.play.clock?.displayValue}`)}</td><td>${esc(t.branch)}</td>
-     <td style="white-space:normal;font-family:var(--mono);font-size:11px">${esc(String(t.play.text || '').slice(0, 150))}</td></tr>`).join('');
+     <td style="white-space:normal;font-family:var(--mono);font-size:11px">${esc(String(t.play.text || '').slice(0, 260))}</td></tr>`).join('');
   const diagJson = gameDiagJson(a);
   return `
   <div class="verdict ${a.pass ? 'pass' : 'fail'}">${a.pass ? 'PASS' : 'FAIL'} — ${esc(a.evMeta?.name || '')}
@@ -509,7 +509,7 @@ async function probeWeek() {
     branchCounts: weekBranches,
     outliers: weekOutliers.slice(0, 25).map(compactOutlier),
     suspiciousUncredited: weekSusp.slice(0, 25).map((s) =>
-      `[${s.game}|Q${s.t.play.period?.number} ${s.t.play.clock?.displayValue}|${s.t.branch}] ${String(s.t.play.text || '').slice(0, 150)}`),
+      `[${s.game}|Q${s.t.play.period?.number} ${s.t.play.clock?.displayValue}|${s.t.branch}] ${String(s.t.play.text || '').slice(0, 260)}`),
   }, null, 1);
   $('report').innerHTML = `
     <div class="verdict ${overall ? 'pass' : 'fail'}">${overall ? 'WEEK PASS' : 'WEEK FAIL'} — ${passed.length}/${results.length} games pass
