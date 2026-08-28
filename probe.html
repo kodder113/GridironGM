@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GGM — ESPN Play-by-Play Probe (dev only)</title>
+<style>
+  :root {
+    --bg: #0a0a0f; --panel: #14141d; --panel2: #1b1b28; --line: #2a2a3d;
+    --text: #e8e8f0; --dim: #9a9ab0; --accent: #8b5cf6; --good: #22c55e;
+    --warn: #f59e0b; --bad: #ef4444; --mono: ui-monospace, 'Cascadia Code', Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; padding: 24px; }
+  h1 { font-size: 22px; letter-spacing: 2px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--dim); margin: 4px 0 20px; font-size: 13px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); margin-bottom: 10px; }
+  label { color: var(--dim); font-size: 13px; margin-right: 4px; }
+  input, button, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; font-size: 14px; }
+  input { width: 90px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .4; cursor: default; }
+  .games { display: flex; flex-wrap: wrap; gap: 8px; }
+  .games button { font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  td.num, th.num { text-align: right; font-family: var(--mono); }
+  .scroll { overflow-x: auto; }
+  .ok { color: var(--good); font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .verdict { border-radius: 10px; padding: 14px 18px; font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  .verdict.pass { background: rgba(34,197,94,.12); border: 1px solid var(--good); color: var(--good); }
+  .verdict.fail { background: rgba(239,68,68,.12); border: 1px solid var(--bad); color: var(--bad); }
+  .verdict small { display: block; font-weight: 400; font-size: 13px; color: var(--text); margin-top: 4px; }
+  .kv { display: flex; flex-wrap: wrap; gap: 6px 26px; font-size: 13px; }
+  .kv b { font-family: var(--mono); font-weight: 600; }
+  .kv span { color: var(--dim); }
+  .sample { font-family: var(--mono); font-size: 12px; color: var(--dim); margin-top: 8px; word-break: break-word; white-space: normal; }
+  #status { color: var(--dim); font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .muted { color: var(--dim); }
+</style>
+</head>
+<body>
+<h1>ESPN PLAY-BY-PLAY <span>PROBE</span></h1>
+<p class="sub">Dev-only. Empirically verifies that ESPN <code>summary?event=</code> play-by-play carries enough
+period/clock/stat detail for Tier&nbsp;2 boundary reconstruction. Run this in a normal browser
+(ESPN blocks nothing here — the endpoints are public and CORS-open). Nothing on this page touches Supabase.</p>
+
+<div class="card">
+  <h2>1 · Pick a completed week</h2>
+  <label>Season</label><input id="year" type="number" value="2025">
+  <label>Week</label><input id="week" type="number" value="1" min="1" max="18">
+  <button class="primary" onclick="loadWeek()">Load games</button>
+  <button id="btn-week" onclick="probeWeek()" disabled>Probe entire week</button>
+  <div id="status"></div>
+  <div class="games" id="games" style="margin-top:12px"></div>
+</div>
+
+<div id="report"></div>
+
+<script src="pbp.js"></script>
+<script>
+'use strict';
+const API = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let weekEvents = [];
+
+// Standard scoring — mirrors DEFAULT_SCORING in app.js (full PPR).
+function fantasyPts(st) {
+  return Math.round((
+    (st.passYds || 0) / 25 + (st.passTD || 0) * 4 - (st.passInt || 0) * 2
+    + (st.rushYds || 0) / 10 + (st.rushTD || 0) * 6
+    + (st.rec || 0) + (st.recYds || 0) / 10 + (st.recTD || 0) * 6
+    - (st.fumLost || 0) * 2
+    + (st.fgMade || 0) * 3 + (st.fgBonus || 0) + (st.xpMade || 0)) * 100) / 100;
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status} on ${url}`);
+  return r.json();
+}
+
+async function loadWeek() {
+  $('status').textContent = 'Fetching scoreboard…';
+  $('games').innerHTML = '';
+  $('report').innerHTML = '';
+  try {
+    const y = $('year').value, w = $('week').value;
+    const sb = await fetchJson(`${API}/scoreboard?dates=${y}&seasontype=2&week=${w}`);
+    weekEvents = (sb.events || []).map((ev) => {
+      const comp = ev.competitions?.[0] || {};
+      const home = comp.competitors?.find((c) => c.homeAway === 'home');
+      const away = comp.competitors?.find((c) => c.homeAway === 'away');
+      return {
+        id: ev.id,
+        name: `${away?.team?.abbreviation} @ ${home?.team?.abbreviation}`,
+        final: ev.status?.type?.state === 'post',
+        homeAbbr: home?.team?.abbreviation, awayAbbr: away?.team?.abbreviation,
+      };
+    });
+    const finals = weekEvents.filter((e) => e.final);
+    $('status').textContent = `${weekEvents.length} games, ${finals.length} final. Pick one, or probe the whole week.`;
+    $('btn-week').disabled = finals.length === 0;
+    $('games').innerHTML = weekEvents.map((e) =>
+      `<button onclick="probeGame('${e.id}')" ${e.final ? '' : 'disabled title="not final"'}>${esc(e.name)}</button>`
+    ).join('');
+  } catch (err) {
+    $('status').innerHTML = `<span class="bad">Failed: ${esc(err.message)}</span>`;
+  }
+}
+
+// ---- box-score truth: same categories parseSummary() reads ----
+function boxLines(summary) {
+  const lines = {}; // id -> {name, team, st}
+  const teamKicker = {};
+  const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+  for (const tb of summary.boxscore?.players || []) {
+    const abbr = tb.team?.abbreviation;
+    for (const cat of tb.statistics || []) {
+      const idx = {};
+      (cat.labels || []).forEach((l, i) => { idx[l] = i; });
+      for (const a of cat.athletes || []) {
+        if (!a.athlete) continue;
+        const id = String(a.athlete.id);
+        const s = a.stats || [];
+        const get = (l) => num(s[idx[l]]);
+        const line = (lines[id] ||= { name: a.athlete.displayName, team: abbr, st: PBP.zero() });
+        switch (cat.name) {
+          case 'passing': {
+            const [c, at] = (s[idx['C/ATT']] || '0/0').split('/').map(Number);
+            Object.assign(line.st, { passComp: c || 0, passAtt: at || 0, passYds: get('YDS'), passTD: get('TD'), passInt: get('INT') });
+            break;
+          }
+          case 'rushing': Object.assign(line.st, { rushAtt: get('CAR'), rushYds: get('YDS'), rushTD: get('TD') }); break;
+          case 'receiving': Object.assign(line.st, { rec: get('REC'), recYds: get('YDS'), recTD: get('TD') }); break;
+          case 'fumbles': line.st.fumLost = get('LOST'); break;
+          case 'kicking': {
+            const [fm, fa] = (s[idx['FG']] || '0/0').split('/').map(Number);
+            const [xm, xa] = (s[idx['XP']] || '0/0').split('/').map(Number);
+            Object.assign(line.st, { fgMade: fm || 0, fgAtt: fa || 0, xpMade: xm || 0, xpAtt: xa || 0 });
+            if ((fa || xa) && !teamKicker[abbr]) teamKicker[abbr] = id;
+            break;
+          }
+        }
+      }
+    }
+  }
+  // FG distance bonuses from scoringPlays (standard units: +1 per 40–49, +2 per 50+)
+  for (const sp of summary.scoringPlays || []) {
+    const text = sp.text || '';
+    if (!/field goal/i.test(text)) continue;
+    const m = text.match(/(\d+)\s*[Yy]a?r?d/);
+    const yds = m ? parseInt(m[1], 10) : 0;
+    const kid = teamKicker[sp.team?.abbreviation];
+    if (kid && lines[kid] && yds >= 40) lines[kid].st.fgBonus += yds >= 50 ? 2 : 1;
+  }
+  return lines;
+}
+
+// ---- linescore validation: scoring-play clocks vs official quarter scores ----
+function linescoreCheck(summary) {
+  const comp = summary.header?.competitions?.[0];
+  if (!comp) return null;
+  const home = comp.competitors?.find((c) => c.homeAway === 'home');
+  const away = comp.competitors?.find((c) => c.homeAway === 'away');
+  if (!home?.linescores?.length) return null;
+  const cum = (ls, q) => ls.slice(0, q).reduce((a, x) => a + (Number(x.displayValue ?? x.value) || 0), 0);
+  const sps = (summary.scoringPlays || [])
+    .map((sp) => ({ el: PBP.playElapsedSec(sp), home: sp.homeScore, away: sp.awayScore }))
+    .filter((x) => x.el != null)
+    .sort((a, b) => a.el - b.el);
+  const rows = [];
+  let allOk = true;
+  const qs = Math.max(home.linescores.length, 4);
+  for (let q = 1; q <= qs; q++) {
+    const boundary = q <= 4 ? q * 900 : 3600 + (q - 4) * 600;
+    let h = 0, a = 0;
+    for (const sp of sps) if (sp.el <= boundary) { h = sp.home; a = sp.away; }
+    const oh = cum(home.linescores, q), oa = cum(away.linescores, q);
+    const ok = h === oh && a === oa;
+    allOk = allOk && ok;
+    rows.push({ q, recon: `${a}–${h}`, official: `${oa}–${oh}`, ok });
+  }
+  return { rows, allOk, clockedSp: sps.length, totalSp: (summary.scoringPlays || []).length };
+}
+
+// ---- full analysis of one game ----
+function analyzeGame(summary, evMeta) {
+  const diag = PBP.diagnostics(summary);
+  const box = boxLines(summary);
+  const reconFull = PBP.reconstructAt(summary, 99);
+  const players = Object.keys(box).map((id) => {
+    const bp = fantasyPts(box[id].st);
+    const rp = fantasyPts(reconFull[id] || PBP.zero());
+    return { id, name: box[id].name, team: box[id].team, boxPts: bp, reconPts: rp, drift: Math.abs(rp - bp) };
+  }).filter((p) => p.boxPts !== 0 || p.reconPts !== 0)
+    .sort((a, b) => b.boxPts - a.boxPts);
+  const drifts = players.map((p) => p.drift).sort((a, b) => a - b);
+  const median = drifts.length ? drifts[Math.floor(drifts.length / 2)] : 0;
+  const max = drifts.length ? drifts[drifts.length - 1] : 0;
+  // aggregate category totals (diagnoses parser gaps)
+  const totals = { box: PBP.zero(), recon: PBP.zero() };
+  for (const id of Object.keys(box)) {
+    for (const k of Object.keys(totals.box)) {
+      totals.box[k] += box[id].st[k] || 0;
+      totals.recon[k] += (reconFull[id] || {})[k] || 0;
+    }
+  }
+  const ls = linescoreCheck(summary);
+  // boundary demo for top players
+  const B = [0.25, 5 / 12, 0.5, 0.75, 1.0];
+  const cuts = B.map((b) => PBP.reconstructAt(summary, b));
+  const demo = players.slice(0, 6).map((p) => ({
+    name: p.name,
+    at: B.map((b, i) => fantasyPts(cuts[i][p.id] || PBP.zero())),
+    full: p.reconPts,
+  }));
+  const pass = diag.clockedPct >= 98 && median <= 1.5 && (!ls || ls.allOk);
+  return { diag, players, median, max, totals, ls, demo, pass, evMeta };
+}
+
+async function probeGame(eventId) {
+  const ev = weekEvents.find((e) => e.id === eventId);
+  $('status').textContent = `Fetching summary for ${ev?.name}…`;
+  try {
+    const summary = await fetchJson(`${API}/summary?event=${eventId}`);
+    const a = analyzeGame(summary, ev);
+    $('status').textContent = '';
+    $('report').innerHTML = renderGameReport(a);
+  } catch (err) {
+    $('status').innerHTML = `<span class="bad">Failed: ${esc(err.message)}</span>`;
+  }
+}
+
+function renderGameReport(a) {
+  const d = a.diag;
+  const cls = (ok) => ok ? 'ok' : 'bad';
+  const sample = d.samplePlay
+    ? `Q${d.samplePlay.period?.number} ${d.samplePlay.clock?.displayValue} — ${esc(d.samplePlay.text)}` : '(none)';
+  const catRows = ['passYds', 'passTD', 'passInt', 'rushYds', 'rushTD', 'rec', 'recYds', 'recTD', 'fumLost', 'fgMade', 'fgBonus', 'xpMade']
+    .map((k) => {
+      const b = a.totals.box[k], r = a.totals.recon[k];
+      return `<tr><td>${k}</td><td class="num">${b}</td><td class="num">${r}</td>
+        <td class="num ${cls(Math.abs(b - r) <= Math.max(2, b * 0.03))}">${r - b >= 0 ? '+' : ''}${Math.round((r - b) * 10) / 10}</td></tr>`;
+    }).join('');
+  const playerRows = a.players.slice(0, 16).map((p) =>
+    `<tr><td>${esc(p.name)}</td><td class="muted">${esc(p.team)}</td>
+     <td class="num">${p.boxPts.toFixed(1)}</td><td class="num">${p.reconPts.toFixed(1)}</td>
+     <td class="num ${p.drift <= 1.5 ? 'ok' : p.drift <= 3 ? 'warn' : 'bad'}">${p.drift.toFixed(1)}</td></tr>`).join('');
+  const demoRows = a.demo.map((p) =>
+    `<tr><td>${esc(p.name)}</td>${p.at.map((v) => `<td class="num">${v.toFixed(1)}</td>`).join('')}
+     <td class="num">${p.full.toFixed(1)}</td></tr>`).join('');
+  const lsBlock = a.ls ? `
+    <div class="card"><h2>Clock sanity — scoring plays vs official linescores</h2>
+      <div class="kv"><div><span>scoring plays with clock</span> <b>${a.ls.clockedSp}/${a.ls.totalSp}</b></div>
+      <div><span>quarters match</span> <b class="${cls(a.ls.allOk)}">${a.ls.allOk ? 'ALL MATCH' : 'MISMATCH'}</b></div></div>
+      <table><tr><th>End of</th><th>Reconstructed (A–H)</th><th>Official (A–H)</th><th></th></tr>
+      ${a.ls.rows.map((r) => `<tr><td>Q${r.q}</td><td class="num">${r.recon}</td><td class="num">${r.official}</td>
+        <td class="${cls(r.ok)}">${r.ok ? '✓' : '✗'}</td></tr>`).join('')}</table></div>` : '';
+  return `
+  <div class="verdict ${a.pass ? 'pass' : 'fail'}">${a.pass ? 'PASS' : 'FAIL'} — ${esc(a.evMeta?.name || '')}
+    <small>clocked plays ${d.clockedPct}% (need ≥98) · median player drift ${a.median.toFixed(1)} pts (need ≤1.5) · max drift ${a.max.toFixed(1)} pts${a.ls ? ` · linescores ${a.ls.allOk ? 'match' : 'MISMATCH'}` : ''}</small>
+  </div>
+  <div class="card"><h2>Play-by-play diagnostics</h2>
+    <div class="kv">
+      <div><span>total plays</span> <b>${d.totalPlays}</b></div>
+      <div><span>with period+clock</span> <b class="${cls(d.clockedPct >= 98)}">${d.clockedPlays} (${d.clockedPct}%)</b></div>
+      <div><span>periods seen</span> <b>${d.periods.join(', ')}</b></div>
+    </div>
+    <div class="sample">sample: ${sample}</div>
+  </div>
+  ${lsBlock}
+  <div class="card"><h2>Reconstructed full game vs official box score (standard scoring)</h2>
+    <div class="scroll"><table>
+      <tr><th>Player</th><th>Team</th><th class="num">Box pts</th><th class="num">Recon pts</th><th class="num">Drift</th></tr>
+      ${playerRows}</table></div>
+  </div>
+  <div class="card"><h2>Category totals (whole game, both teams)</h2>
+    <div class="scroll"><table><tr><th>Stat</th><th class="num">Box</th><th class="num">Recon</th><th class="num">Δ</th></tr>${catRows}</table></div>
+  </div>
+  <div class="card"><h2>Boundary demo — cumulative reconstructed points</h2>
+    <p class="muted" style="font-size:13px">This is the Tier-2 operation the boundary model needs: points from plays snapped before X% of the scheduled 60 minutes. 41.7% = Thursday halftime example.</p>
+    <div class="scroll"><table>
+      <tr><th>Player</th><th class="num">25%</th><th class="num">41.7%</th><th class="num">50%</th><th class="num">75%</th><th class="num">100%</th><th class="num">Full (+OT)</th></tr>
+      ${demoRows}</table></div>
+  </div>`;
+}
+
+// ---- probe every final game in the loaded week ----
+async function probeWeek() {
+  const finals = weekEvents.filter((e) => e.final);
+  $('btn-week').disabled = true;
+  $('report').innerHTML = '';
+  const results = [];
+  const allDrifts = [];
+  for (let i = 0; i < finals.length; i++) {
+    $('status').textContent = `Probing ${finals[i].name} (${i + 1}/${finals.length})…`;
+    try {
+      const summary = await fetchJson(`${API}/summary?event=${finals[i].id}`);
+      const a = analyzeGame(summary, finals[i]);
+      results.push(a);
+      allDrifts.push(...a.players.map((p) => p.drift));
+    } catch (err) {
+      results.push({ evMeta: finals[i], error: err.message });
+    }
+    await new Promise((res) => setTimeout(res, 350)); // be polite to ESPN
+  }
+  $('btn-week').disabled = false;
+  $('status').textContent = '';
+  allDrifts.sort((a, b) => a - b);
+  const median = allDrifts.length ? allDrifts[Math.floor(allDrifts.length / 2)] : 0;
+  const p90 = allDrifts.length ? allDrifts[Math.floor(allDrifts.length * 0.9)] : 0;
+  const max = allDrifts.length ? allDrifts[allDrifts.length - 1] : 0;
+  const errored = results.filter((r) => r.error);
+  const passed = results.filter((r) => !r.error && r.pass);
+  const overall = !errored.length && passed.length === results.length && median <= 1.5;
+  const rows = results.map((r) => r.error
+    ? `<tr><td>${esc(r.evMeta.name)}</td><td colspan="4" class="bad">${esc(r.error)}</td></tr>`
+    : `<tr><td>${esc(r.evMeta.name)}</td><td class="num">${r.diag.clockedPct}%</td>
+       <td class="num">${r.median.toFixed(1)}</td><td class="num">${r.max.toFixed(1)}</td>
+       <td class="${r.pass ? 'ok' : 'bad'}">${r.pass ? 'PASS' : 'FAIL'}</td></tr>`).join('');
+  $('report').innerHTML = `
+    <div class="verdict ${overall ? 'pass' : 'fail'}">${overall ? 'WEEK PASS' : 'WEEK FAIL'} — ${passed.length}/${results.length} games pass
+      <small>${allDrifts.length} scored player-lines · median drift ${median.toFixed(1)} pts · p90 ${p90.toFixed(1)} pts · max ${max.toFixed(1)} pts${errored.length ? ` · ${errored.length} fetch errors` : ''}</small>
+    </div>
+    <div class="card"><h2>Per-game results (click a game above for its full report)</h2>
+      <div class="scroll"><table>
+        <tr><th>Game</th><th class="num">Clocked</th><th class="num">Median drift</th><th class="num">Max drift</th><th>Verdict</th></tr>
+        ${rows}</table></div>
+    </div>`;
+}
+</script>
+</body>
+</html>
