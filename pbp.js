@@ -299,13 +299,13 @@
         const penTeam = pi >= 0 ? (low.slice(pi).match(/penalty on ([a-z]{2,4})-/) || [])[1] : null;
         const returnFoul = pi >= 0
           && /illegal block|unnecessary roughness|unsportsmanlike|face mask|horse collar|taunting/.test(low.slice(pi));
-        // ...or the flag is walked off against the recovering team in their
-        // OWN territory (the possession change stood; only the return was
-        // penalized) — vs. a play-phase foul enforced back at the original
-        // offense's spot, which wipes the turnover with the play
-        const enfTeam = pi >= 0 ? (low.slice(pi).match(/enforced at ([a-z]{2,4}) \d+/) || [])[1] : null;
-        const stood = recTeam && penTeam && normTeam(recTeam) === normTeam(penTeam)
-          && (returnFoul || (enfTeam && normTeam(enfTeam) === normTeam(penTeam)));
+        // Any other foul (holding, offside, DPI...) wipes the turnover with
+        // the play. The season sweep found one true counterexample (a
+        // defensive-holding flag where the box kept the fumble) but three
+        // identical-looking texts where it did not — the text cannot
+        // distinguish them, so the conservative rule stands and that one
+        // case is a documented residual caught by the settlement self-check.
+        const stood = recTeam && penTeam && normTeam(recTeam) === normTeam(penTeam) && returnFoul;
         if (pi < 0 || stood) {
           fumbleCheck(low, nameKey(text), entries, acc, null, offense);
           return 'no-play+fumble';
