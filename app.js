@@ -886,11 +886,13 @@ function parseSummary(summary, ev, week) {
     }
   }
 
-  // Scoring plays: FG distance bonuses + safeties
+  // Scoring plays: FG distance bonuses + safeties.
+  // "Return of Blocked Field Goal" scoring plays contain "field goal" but
+  // are NOT makes — no distance bonus for those.
   for (const sp of summary.scoringPlays || []) {
     const t = normAbbr(sp.team?.abbreviation);
     const text = sp.text || '';
-    if (/field goal/i.test(text)) {
+    if (/field goal/i.test(text) && !/blocked|return/i.test(text)) {
       const m = text.match(/(\d+)\s*[Yy]a?r?d/);
       const yds = m ? parseInt(m[1], 10) : 0;
       const kicker = teamKicker[t];

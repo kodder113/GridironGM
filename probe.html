@@ -167,7 +167,8 @@ function boxLines(summary) {
   // FG distance bonuses from scoringPlays (standard units: +1 per 40–49, +2 per 50+)
   for (const sp of summary.scoringPlays || []) {
     const text = sp.text || '';
-    if (!/field goal/i.test(text)) continue;
+    // "Return of Blocked Field Goal" is not a make — no distance bonus
+    if (!/field goal/i.test(text) || /blocked|return/i.test(text)) continue;
     const m = text.match(/(\d+)\s*[Yy]a?r?d/);
     const yds = m ? parseInt(m[1], 10) : 0;
     const kid = teamKicker[sp.team?.abbreviation];

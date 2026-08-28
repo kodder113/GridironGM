@@ -299,7 +299,14 @@
         const penTeam = pi >= 0 ? (low.slice(pi).match(/penalty on ([a-z]{2,4})-/) || [])[1] : null;
         const returnFoul = pi >= 0
           && /illegal block|unnecessary roughness|unsportsmanlike|face mask|horse collar|taunting/.test(low.slice(pi));
-        if (pi < 0 || (recTeam && penTeam && normTeam(recTeam) === normTeam(penTeam) && returnFoul)) {
+        // ...or the flag is walked off against the recovering team in their
+        // OWN territory (the possession change stood; only the return was
+        // penalized) — vs. a play-phase foul enforced back at the original
+        // offense's spot, which wipes the turnover with the play
+        const enfTeam = pi >= 0 ? (low.slice(pi).match(/enforced at ([a-z]{2,4}) \d+/) || [])[1] : null;
+        const stood = recTeam && penTeam && normTeam(recTeam) === normTeam(penTeam)
+          && (returnFoul || (enfTeam && normTeam(enfTeam) === normTeam(penTeam)));
+        if (pi < 0 || stood) {
           fumbleCheck(low, nameKey(text), entries, acc, null, offense);
           return 'no-play+fumble';
         }
@@ -416,8 +423,15 @@
     // does count against them.
     if (/\b(kicks|punts|kickoff|punt)\b/.test(low) && !/\b(pass|rush|rushes|left|right|middle|scrambles)\b/.test(low)) {
       if (/fumbles|muffs/.test(low)) {
-        const km = key.search(/\b(?:kicks|punts)\b/);
-        const returner = firstMatch(entries, key, km >= 0 ? km + 6 : 0, null);
+        // never the "Center-X"/"Holder-X" annotations; a muff anchors to the
+        // name immediately before "MUFFS"
+        const cleanKey = key.replace(/\b(?:center|holder)-[a-z'.\-]+/g, ' ');
+        const mi = cleanKey.indexOf(' muffs');
+        let returner = mi > 0 ? matchEnding(entries, cleanKey.slice(0, mi), null) : null;
+        if (!returner) {
+          const km = cleanKey.search(/\b(?:kicks|punts)\b/);
+          returner = firstMatch(entries, cleanKey, km >= 0 ? km + 6 : 0, null);
+        }
         if (returner) fumbleCheck(low, key, entries, acc, returner.id, offense);
       }
       // return-TD summary lines ride the kick branch but still carry a real
