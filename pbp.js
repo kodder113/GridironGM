@@ -128,10 +128,12 @@
     fumLost: 0, fgMade: 0, fgAtt: 0, fgBonus: 0, xpMade: 0, xpAtt: 0,
   });
 
+  // Returns a branch label describing how the play was classified — used by
+  // tracePlays() for diagnostics; reconstructAt() ignores it.
   function creditPlay(play, entries, acc) {
     const text = String(play.text || '');
-    if (/no play/i.test(text)) return;            // nullified by penalty
-    if (/two-point|two point/i.test(text)) return; // 2pt ignored by design
+    if (/no play/i.test(text)) return 'no-play';            // nullified by penalty
+    if (/two-point|two point/i.test(text)) return 'two-point'; // 2pt ignored by design
     // `key` (digits stripped) is only for NAME matching; every numeric or
     // phrase predicate parses `low`, which keeps digits.
     const key = nameKey(text);
@@ -151,41 +153,39 @@
     if (/(?:yard|yd) field goal/.test(low)) {
       const kicker = firstMatch(entries, key, 0);
       const dist = (low.match(/(\d+)\s*(?:yard|yd) field goal/) || [])[1];
-      if (kicker) {
-        const k = get(kicker.id);
-        k.fgAtt++;
-        if (/is good/.test(low)) {
-          k.fgMade++;
-          const d = Number(dist) || 0;
-          if (d >= 50) k.fgBonus += 2; else if (d >= 40) k.fgBonus += 1;
-        }
+      if (!kicker) return 'fg-nokicker';
+      const k = get(kicker.id);
+      k.fgAtt++;
+      if (/is good/.test(low)) {
+        k.fgMade++;
+        const d = Number(dist) || 0;
+        if (d >= 50) k.fgBonus += 2; else if (d >= 40) k.fgBonus += 1;
       }
-      return;
+      return 'fg';
     }
     if (/extra point/.test(low)) {
       const kicker = firstMatch(entries, key, 0);
-      if (kicker) {
-        const k = get(kicker.id);
-        k.xpAtt++;
-        if (/is good/.test(low)) k.xpMade++;
-      }
-      return;
+      if (!kicker) return 'xp-nokicker';
+      const k = get(kicker.id);
+      k.xpAtt++;
+      if (/is good/.test(low)) k.xpMade++;
+      return 'xp';
     }
-    if (/kicks|punts|kickoff|punt/.test(low) && !/pass|rush|left|right|middle|scrambles/.test(low)) return;
+    if (/kicks|punts|kickoff|punt/.test(low) && !/pass|rush|left|right|middle|scrambles/.test(low)) return 'kick';
 
     // passes
     if (/ pass /.test(low) || /^(\(.*?\)\s*)?\S+.*? pass(ed)? /.test(low)) {
       const passer = firstMatch(entries, key, 0);
-      if (!passer) return;
+      if (!passer) return 'pass-no-passer';
       const p = get(passer.id);
-      if (/intercepted/.test(low)) { p.passAtt++; p.passInt++; return; }
-      if (/incomplete/.test(low)) { p.passAtt++; return; }
+      if (/intercepted/.test(low)) { p.passAtt++; p.passInt++; return 'pass-int'; }
+      if (/incomplete/.test(low)) { p.passAtt++; return 'pass-incomplete'; }
       const toIdx = key.indexOf(' to ');
       const receiver = toIdx >= 0 ? firstMatch(entries, key, toIdx + 4) : null;
       const yds = ydsMatch();
       if (yds == null) { // completed but yardage not parseable (rare)
         p.passAtt++; p.passComp++;
-        return;
+        return 'pass-no-yds';
       }
       p.passAtt++; p.passComp++; p.passYds += yds;
       if (td) p.passTD++;
@@ -195,24 +195,24 @@
         if (td) r.recTD++;
       }
       fumbleCheck(low, key, entries, acc, receiver ? receiver.id : passer.id);
-      return;
+      return receiver ? 'pass' : 'pass-no-receiver';
     }
 
     // sacks: no fantasy-relevant offense stats in our model
-    if (/sacked/.test(low)) { fumbleCheck(low, key, entries, acc, null); return; }
+    if (/sacked/.test(low)) { fumbleCheck(low, key, entries, acc, null); return 'sack'; }
 
     // rushes (incl. scrambles and kneels)
     if (/(left|right|middle|end|guard|tackle|scrambles|kneels|up the middle)/.test(low)) {
       const rusher = firstMatch(entries, key, 0);
       const yds = ydsMatch();
-      if (rusher && yds != null) {
-        const r = get(rusher.id);
-        r.rushAtt++; r.rushYds += yds;
-        if (td) r.rushTD++;
-        fumbleCheck(low, key, entries, acc, rusher.id);
-      }
-      return;
+      if (!rusher || yds == null) return !rusher ? 'rush-no-rusher' : 'rush-no-yds';
+      const r = get(rusher.id);
+      r.rushAtt++; r.rushYds += yds;
+      if (td) r.rushTD++;
+      fumbleCheck(low, key, entries, acc, rusher.id);
+      return 'rush';
     }
+    return 'other';
   }
 
   function fumbleCheck(low, key, entries, acc, carrierId) {
@@ -249,6 +249,18 @@
     return { before, full, after: out };
   }
 
+  // Per-play forensic trace: how each play was classified and exactly which
+  // stats it credited to whom. creditPlay has no cross-play state, so running
+  // each play into a fresh accumulator yields its isolated contribution.
+  function tracePlays(summary) {
+    const entries = buildMatcher(summary);
+    return allPlays(summary).map((play) => {
+      const acc = {};
+      const branch = creditPlay(play, entries, acc) || 'other';
+      return { play, elapsed: playElapsedSec(play), key: nameKey(play.text), branch, credits: acc };
+    });
+  }
+
   function diagnostics(summary) {
     const plays = allPlays(summary);
     const clocked = plays.filter((p) => playElapsedSec(p) != null);
@@ -261,5 +273,5 @@
     };
   }
 
-  window.PBP = { allPlays, playElapsedSec, buildMatcher, reconstructAt, statsAfterBoundary, diagnostics, zero };
+  window.PBP = { allPlays, playElapsedSec, buildMatcher, reconstructAt, statsAfterBoundary, diagnostics, tracePlays, nameKey, zero };
 })();

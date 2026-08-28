@@ -192,6 +192,93 @@ function linescoreCheck(summary) {
   return { rows, allOk, clockedSp: sps.length, totalSp: (summary.scoringPlays || []).length };
 }
 
+// ---- deep diagnosis: where do the errors come from? ----
+// fantasy-point weight of one unit of each stat (standard scoring)
+const STAT_W = { passYds: .04, passTD: 4, passInt: 2, rushYds: .1, rushTD: 6,
+  rec: 1, recYds: .1, recTD: 6, fumLost: 2, fgMade: 3, fgBonus: 1, xpMade: 1 };
+const nonzero = (st) => { const o = {}; for (const k in st) if (st[k]) o[k] = st[k]; return o; };
+
+function deepDiagnose(summary, box, reconFull) {
+  const traces = PBP.tracePlays(summary);
+  const entries = PBP.buildMatcher(summary);
+  const byId = {};
+  entries.forEach((e) => { byId[e.id] = e; });
+  const branchCounts = {};
+  for (const t of traces) branchCounts[t.branch] = (branchCounts[t.branch] || 0) + 1;
+  // plays the parser did NOT fully credit but which mention a known athlete —
+  // the prime suspects for missed production
+  const SUSPECT = ['other', 'pass-no-passer', 'pass-no-yds', 'pass-no-receiver',
+    'rush-no-rusher', 'rush-no-yds', 'fg-nokicker', 'xp-nokicker', 'kick'];
+  const suspicious = traces.filter((t) => SUSPECT.includes(t.branch)
+    && entries.some((e) => e.patterns.some((p) => t.key.includes(p))));
+  const ids = new Set([...Object.keys(box), ...Object.keys(reconFull)]);
+  const outliers = [];
+  const catErrAll = {}; // fantasy error points attributable to each stat, all players
+  for (const id of ids) {
+    const b = box[id] ? box[id].st : PBP.zero();
+    const r = reconFull[id] || PBP.zero();
+    for (const k of Object.keys(STAT_W)) {
+      catErrAll[k] = (catErrAll[k] || 0) + Math.abs((r[k] || 0) - (b[k] || 0)) * STAT_W[k];
+    }
+    const drift = Math.abs(fantasyPts(r) - fantasyPts(b));
+    if (drift < 3) continue;
+    const cats = [];
+    for (const k of Object.keys(STAT_W)) {
+      const d = (r[k] || 0) - (b[k] || 0);
+      if (d) cats.push({ k, box: b[k] || 0, recon: r[k] || 0, errPts: Math.round(Math.abs(d) * STAT_W[k] * 10) / 10 });
+    }
+    cats.sort((x, y) => y.errPts - x.errPts);
+    const pats = (byId[id] || {}).patterns || [];
+    const plays = traces
+      .filter((t) => t.credits[id] || pats.some((p) => t.key.includes(p)))
+      .map((t) => ({
+        clock: `Q${t.play.period?.number} ${t.play.clock?.displayValue}`,
+        branch: t.branch,
+        credited: t.credits[id] ? nonzero(t.credits[id]) : null,
+        creditedTo: !t.credits[id] && Object.keys(t.credits).length
+          ? Object.keys(t.credits).map((x) => (byId[x] || {}).name || x).join(', ') : null,
+        text: String(t.play.text || '').slice(0, 150),
+      }));
+    outliers.push({
+      id, name: (box[id] || byId[id] || { name: id }).name, team: (box[id] || {}).team || '?',
+      boxPts: fantasyPts(b), reconPts: fantasyPts(r), drift, cats, plays,
+      boxOnly: !box[id] ? 'NOT IN BOX SCORE (misattributed credit?)' : null,
+    });
+  }
+  outliers.sort((x, y) => y.drift - x.drift);
+  for (const k of Object.keys(catErrAll)) catErrAll[k] = Math.round(catErrAll[k] * 10) / 10;
+  return { branchCounts, suspicious, outliers, catErrAll };
+}
+
+// ---- compact diagnostic JSON for reporting back ----
+function compactOutlier(o) {
+  const unc = o.plays.filter((p) => !p.credited);
+  const cred = o.plays.filter((p) => p.credited);
+  const over = o.reconPts > o.boxPts; // over-credit: the credited plays are the evidence
+  return {
+    player: `${o.name} (${o.team})`, box: o.boxPts, recon: o.reconPts,
+    drift: Math.round(o.drift * 10) / 10,
+    ...(o.boxOnly ? { note: o.boxOnly } : {}),
+    cats: o.cats.map((c) => `${c.k}: box ${c.box} vs recon ${c.recon} (${c.errPts} err pts)`),
+    uncreditedMentions: unc.slice(0, 12).map((p) =>
+      `[${p.clock}|${p.branch}${p.creditedTo ? '|→' + p.creditedTo : ''}] ${p.text}`),
+    creditedPlays: cred.slice(0, over ? 12 : 4).map((p) =>
+      `[${p.clock}|${p.branch}|${JSON.stringify(p.credited)}] ${p.text}`),
+  };
+}
+function gameDiagJson(a) {
+  return JSON.stringify({
+    game: a.evMeta?.name, clockedPct: a.diag.clockedPct,
+    medianDrift: a.median, maxDrift: a.max,
+    linescoresMatch: a.ls ? a.ls.allOk : null,
+    branchCounts: a.deep.branchCounts,
+    errorPtsByCategory: a.deep.catErrAll,
+    outliers: a.deep.outliers.slice(0, 12).map(compactOutlier),
+    suspiciousUncredited: a.deep.suspicious.slice(0, 15).map((t) =>
+      `[Q${t.play.period?.number} ${t.play.clock?.displayValue}|${t.branch}] ${String(t.play.text || '').slice(0, 150)}`),
+  }, null, 1);
+}
+
 // ---- full analysis of one game ----
 function analyzeGame(summary, evMeta) {
   const diag = PBP.diagnostics(summary);
@@ -223,8 +310,9 @@ function analyzeGame(summary, evMeta) {
     at: B.map((b, i) => fantasyPts(cuts[i][p.id] || PBP.zero())),
     full: p.reconPts,
   }));
+  const deep = deepDiagnose(summary, box, reconFull);
   const pass = diag.clockedPct >= 98 && median <= 1.5 && (!ls || ls.allOk);
-  return { diag, players, median, max, totals, ls, demo, pass, evMeta };
+  return { diag, players, median, max, totals, ls, demo, deep, pass, evMeta };
 }
 
 async function probeGame(eventId) {
@@ -265,9 +353,46 @@ function renderGameReport(a) {
       <table><tr><th>End of</th><th>Reconstructed (A–H)</th><th>Official (A–H)</th><th></th></tr>
       ${a.ls.rows.map((r) => `<tr><td>Q${r.q}</td><td class="num">${r.recon}</td><td class="num">${r.official}</td>
         <td class="${cls(r.ok)}">${r.ok ? '✓' : '✗'}</td></tr>`).join('')}</table></div>` : '';
+  const outlierRows = a.deep.outliers.map((o) => {
+    const catLines = o.cats.map((c) =>
+      `<tr><td>${c.k}</td><td class="num">${c.box}</td><td class="num">${c.recon}</td><td class="num bad">${c.errPts}</td></tr>`).join('');
+    const playRows = o.plays.map((p) => `
+      <tr${!p.credited && !p.creditedTo ? ' style="background:rgba(239,68,68,.08)"' : ''}>
+        <td>${esc(p.clock)}</td><td>${esc(p.branch)}</td>
+        <td class="num">${p.credited ? esc(JSON.stringify(p.credited)) : p.creditedTo ? `<span class="warn">→ ${esc(p.creditedTo)}</span>` : '<span class="bad">nothing</span>'}</td>
+        <td style="white-space:normal;font-family:var(--mono);font-size:11px">${esc(p.text)}</td></tr>`).join('');
+    return `<details style="margin-bottom:10px"><summary style="cursor:pointer">
+        <b>${esc(o.name)}</b> <span class="muted">${esc(o.team)}</span> — box ${o.boxPts.toFixed(1)} / recon ${o.reconPts.toFixed(1)}
+        · <span class="bad">drift ${o.drift.toFixed(1)}</span>${o.boxOnly ? ` · <span class="warn">${o.boxOnly}</span>` : ''}</summary>
+      <div style="padding:8px 0 0 16px">
+        <table style="max-width:420px"><tr><th>Stat</th><th class="num">Box</th><th class="num">Recon</th><th class="num">Err pts</th></tr>${catLines}</table>
+        <div style="max-height:340px;overflow:auto;margin-top:8px"><table>
+          <tr><th>Clock</th><th>Branch</th><th>Credited (this player)</th><th>Play text</th></tr>${playRows}</table></div>
+      </div></details>`;
+  }).join('') || '<p class="ok">No player with drift ≥ 3 pts in this game.</p>';
+  const branchRows = Object.entries(a.deep.branchCounts).sort((x, y) => y[1] - x[1])
+    .map(([b, n]) => `<tr><td>${esc(b)}</td><td class="num">${n}</td></tr>`).join('');
+  const suspRows = a.deep.suspicious.slice(0, 20).map((t) =>
+    `<tr><td>${esc(`Q${t.play.period?.number} ${t.play.clock?.displayValue}`)}</td><td>${esc(t.branch)}</td>
+     <td style="white-space:normal;font-family:var(--mono);font-size:11px">${esc(String(t.play.text || '').slice(0, 150))}</td></tr>`).join('');
+  const diagJson = gameDiagJson(a);
   return `
   <div class="verdict ${a.pass ? 'pass' : 'fail'}">${a.pass ? 'PASS' : 'FAIL'} — ${esc(a.evMeta?.name || '')}
-    <small>clocked plays ${d.clockedPct}% (need ≥98) · median player drift ${a.median.toFixed(1)} pts (need ≤1.5) · max drift ${a.max.toFixed(1)} pts${a.ls ? ` · linescores ${a.ls.allOk ? 'match' : 'MISMATCH'}` : ''}</small>
+    <small>clocked plays ${d.clockedPct}% (need ≥98) · median player drift ${a.median.toFixed(1)} pts (need ≤1.5) · max drift ${a.max.toFixed(1)} pts · <b>${a.deep.outliers.length} player-line(s) off by ≥3 pts</b>${a.ls ? ` · linescores ${a.ls.allOk ? 'match' : 'MISMATCH'}` : ''}</small>
+  </div>
+  <div class="card"><h2>Error forensics — every player off by ≥ 3 pts (click to expand)</h2>
+    ${outlierRows}
+  </div>
+  <div class="card"><h2>Parser branch histogram &amp; uncredited plays mentioning known players</h2>
+    <div style="display:flex;gap:24px;flex-wrap:wrap">
+      <table style="max-width:260px;align-self:flex-start"><tr><th>Branch</th><th class="num">Plays</th></tr>${branchRows}</table>
+      <div style="flex:1;min-width:320px"><p class="muted" style="font-size:12px">${a.deep.suspicious.length} suspicious play(s); first 20 shown:</p>
+        <div style="max-height:340px;overflow:auto"><table><tr><th>Clock</th><th>Branch</th><th>Play text</th></tr>${suspRows || '<tr><td colspan=3 class="ok">none</td></tr>'}</table></div></div>
+    </div>
+  </div>
+  <div class="card"><h2>Diagnostic report (copy &amp; paste back to Claude)</h2>
+    <button onclick="navigator.clipboard.writeText(document.getElementById('diag-json').value).then(()=>this.textContent='Copied ✓')">Copy to clipboard</button>
+    <textarea id="diag-json" readonly style="width:100%;height:140px;margin-top:8px;background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;font-family:var(--mono);font-size:11px">${esc(diagJson)}</textarea>
   </div>
   <div class="card"><h2>Play-by-play diagnostics</h2>
     <div class="kv">
@@ -322,19 +447,64 @@ async function probeWeek() {
   const errored = results.filter((r) => r.error);
   const passed = results.filter((r) => !r.error && r.pass);
   const overall = !errored.length && passed.length === results.length && median <= 1.5;
+  // week-wide forensic aggregation
+  const weekOutliers = [];
+  const weekCatErr = {};
+  const weekBranches = {};
+  const weekSusp = [];
+  for (const r of results) {
+    if (r.error) continue;
+    for (const o of r.deep.outliers) weekOutliers.push({ ...o, game: r.evMeta.name });
+    for (const [k, v] of Object.entries(r.deep.catErrAll)) weekCatErr[k] = Math.round(((weekCatErr[k] || 0) + v) * 10) / 10;
+    for (const [b, n] of Object.entries(r.deep.branchCounts)) weekBranches[b] = (weekBranches[b] || 0) + n;
+    for (const t of r.deep.suspicious) weekSusp.push({ game: r.evMeta.name, t });
+  }
+  weekOutliers.sort((x, y) => y.drift - x.drift);
   const rows = results.map((r) => r.error
-    ? `<tr><td>${esc(r.evMeta.name)}</td><td colspan="4" class="bad">${esc(r.error)}</td></tr>`
+    ? `<tr><td>${esc(r.evMeta.name)}</td><td colspan="5" class="bad">${esc(r.error)}</td></tr>`
     : `<tr><td>${esc(r.evMeta.name)}</td><td class="num">${r.diag.clockedPct}%</td>
        <td class="num">${r.median.toFixed(1)}</td><td class="num">${r.max.toFixed(1)}</td>
+       <td class="num ${r.deep.outliers.length ? 'warn' : 'ok'}">${r.deep.outliers.length}</td>
        <td class="${r.pass ? 'ok' : 'bad'}">${r.pass ? 'PASS' : 'FAIL'}</td></tr>`).join('');
+  const catRows = Object.entries(weekCatErr).sort((x, y) => y[1] - x[1])
+    .map(([k, v]) => `<tr><td>${k}</td><td class="num ${v > 20 ? 'bad' : v > 5 ? 'warn' : ''}">${v.toFixed(1)}</td></tr>`).join('');
+  const outRows = weekOutliers.slice(0, 30).map((o) =>
+    `<tr><td>${esc(o.name)}</td><td class="muted">${esc(o.game)}</td>
+     <td class="num">${o.boxPts.toFixed(1)}</td><td class="num">${o.reconPts.toFixed(1)}</td>
+     <td class="num bad">${o.drift.toFixed(1)}</td>
+     <td style="white-space:normal;font-size:12px">${esc(o.cats.slice(0, 3).map((c) => `${c.k} ${c.box}→${c.recon}`).join(' · '))}</td></tr>`).join('');
+  const weekJson = JSON.stringify({
+    summary: { games: results.length, passed: passed.length, playerLines: allDrifts.length,
+      medianDrift: median, p90Drift: p90, maxDrift: max, outlierLines3plus: weekOutliers.length },
+    perGame: results.map((r) => r.error ? { game: r.evMeta.name, error: r.error }
+      : { game: r.evMeta.name, clockedPct: r.diag.clockedPct, median: r.median, max: r.max,
+          outliers3: r.deep.outliers.length, linescoresMatch: r.ls ? r.ls.allOk : null, pass: r.pass }),
+    errorPtsByCategory: weekCatErr,
+    branchCounts: weekBranches,
+    outliers: weekOutliers.slice(0, 25).map(compactOutlier),
+    suspiciousUncredited: weekSusp.slice(0, 25).map((s) =>
+      `[${s.game}|Q${s.t.play.period?.number} ${s.t.play.clock?.displayValue}|${s.t.branch}] ${String(s.t.play.text || '').slice(0, 150)}`),
+  }, null, 1);
   $('report').innerHTML = `
     <div class="verdict ${overall ? 'pass' : 'fail'}">${overall ? 'WEEK PASS' : 'WEEK FAIL'} — ${passed.length}/${results.length} games pass
-      <small>${allDrifts.length} scored player-lines · median drift ${median.toFixed(1)} pts · p90 ${p90.toFixed(1)} pts · max ${max.toFixed(1)} pts${errored.length ? ` · ${errored.length} fetch errors` : ''}</small>
+      <small>${allDrifts.length} scored player-lines · median drift ${median.toFixed(1)} pts · p90 ${p90.toFixed(1)} pts · max ${max.toFixed(1)} pts · <b>${weekOutliers.length} player-line(s) off by ≥3 pts</b>${errored.length ? ` · ${errored.length} fetch errors` : ''}</small>
     </div>
-    <div class="card"><h2>Per-game results (click a game above for its full report)</h2>
+    <div class="card"><h2>Diagnostic report — entire week (copy &amp; paste back to Claude)</h2>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('diag-json').value).then(()=>this.textContent='Copied ✓')">Copy to clipboard</button>
+      <textarea id="diag-json" readonly style="width:100%;height:160px;margin-top:8px;background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;font-family:var(--mono);font-size:11px">${esc(weekJson)}</textarea>
+    </div>
+    <div class="card"><h2>Per-game results (click a game above for its full forensic report)</h2>
       <div class="scroll"><table>
-        <tr><th>Game</th><th class="num">Clocked</th><th class="num">Median drift</th><th class="num">Max drift</th><th>Verdict</th></tr>
+        <tr><th>Game</th><th class="num">Clocked</th><th class="num">Median drift</th><th class="num">Max drift</th><th class="num">Lines ≥3 off</th><th>Verdict</th></tr>
         ${rows}</table></div>
+    </div>
+    <div class="card"><h2>Week error points by stat category</h2>
+      <div class="scroll"><table style="max-width:320px"><tr><th>Stat</th><th class="num">Total err pts</th></tr>${catRows}</table></div>
+    </div>
+    <div class="card"><h2>Worst player-lines of the week</h2>
+      <div class="scroll"><table>
+        <tr><th>Player</th><th>Game</th><th class="num">Box</th><th class="num">Recon</th><th class="num">Drift</th><th>Top category errors</th></tr>
+        ${outRows}</table></div>
     </div>`;
 }
 </script>
