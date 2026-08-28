@@ -97,7 +97,9 @@
   <div id="auth-screen" class="screen">
     <div class="auth-card">
       <div class="coach-stage">
-        <img src="assets/coach.jpg" alt="" class="coach-photo" onload="this.parentElement.classList.add('has-photo')" onerror="this.remove()"/>
+        <img src="assets/coach.png" alt="" class="coach-photo"
+          onload="this.parentElement.classList.add('has-photo'); if (this.src.endsWith('.png')) this.classList.add('transparent');"
+          onerror="if (!this.dataset.alt) { this.dataset.alt = 1; this.src = 'assets/coach.jpg'; } else { this.remove(); }"/>
         <svg class="coach-hero"><use href="#coach"/></svg>
       </div>
       <h1 class="auth-title wordmark"><span class="wm-grid">GRIDIRON</span> <span class="wm-gm">GM</span></h1>

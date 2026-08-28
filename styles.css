@@ -337,6 +337,12 @@ tr.me td { background: rgba(34,197,94,.07); }
   box-shadow: 0 0 60px rgba(124,58,237,.45), 0 14px 40px rgba(0,0,0,.6);
 }
 .coach-stage.has-photo .coach-photo { display: block; }
+/* transparent full-body renders (PNG): no crop, just the purple glow */
+.coach-photo.transparent {
+  width: auto; max-width: 250px; height: 250px; object-fit: contain;
+  border-radius: 0; border: none; box-shadow: none;
+  filter: drop-shadow(0 0 44px rgba(124,58,237,.55)) drop-shadow(0 12px 30px rgba(0,0,0,.6));
+}
 .coach-stage.has-photo .coach-hero { display: none; }
 .badge-mini { width: 30px; height: 30px; vertical-align: -8px; }
 .coach-mid { width: 46px; height: 46px; flex-shrink: 0; }
