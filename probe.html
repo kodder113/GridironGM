@@ -56,8 +56,10 @@ period/clock/stat detail for Tier&nbsp;2 boundary reconstruction. Run this in a 
   <h2>1 · Pick a completed week</h2>
   <label>Season</label><input id="year" type="number" value="2025">
   <label>Week</label><input id="week" type="number" value="1" min="1" max="18">
+  <label>to</label><input id="week-to" type="number" value="18" min="1" max="18">
   <button class="primary" onclick="loadWeek()">Load games</button>
   <button id="btn-week" onclick="probeWeek()" disabled>Probe entire week</button>
+  <button id="btn-range" class="primary" onclick="probeRange()">Probe week range</button>
   <div id="status"></div>
   <div class="games" id="games" style="margin-top:12px"></div>
 </div>
@@ -258,9 +260,18 @@ function deepDiagnose(summary, box, reconFull) {
           ? Object.keys(t.credits).map((x) => (byId[x] || {}).name || x).join(', ') : null,
         text: String(t.play.text || '').slice(0, 260),
       }));
+    // a fumble the box charges but no play text attributes: show every
+    // fumble-ish play in the game so the divergent text form is visible
+    const fumbleContext = issues.some((i) => i.startsWith('fumLost'))
+      ? traces.filter((t) => /fumbles|muffs|aborted/i.test(String(t.play.text || '')))
+          .slice(0, 8).map((t) => ({
+            clock: `Q${t.play.period?.number} ${t.play.clock?.displayValue}`,
+            branch: t.branch, text: String(t.play.text || '').slice(0, 260),
+          }))
+      : null;
     outliers.push({
       id, name: (box[id] || byId[id] || { name: id }).name, team: (box[id] || {}).team || '?',
-      boxPts: fantasyPts(b), reconPts: fantasyPts(r), drift, cats, plays, issues,
+      boxPts: fantasyPts(b), reconPts: fantasyPts(r), drift, cats, plays, issues, fumbleContext,
       boxOnly: !box[id] ? 'NOT IN BOX SCORE (misattributed credit?)' : null,
     });
   }
@@ -285,6 +296,8 @@ function compactOutlier(o) {
       `[${p.clock}|${p.branch}${p.creditedTo ? '|→' + p.creditedTo : ''}] ${p.text}`),
     creditedPlays: cred.slice(0, over ? 12 : 4).map((p) =>
       `[${p.clock}|${p.branch}|${JSON.stringify(p.credited)}] ${p.text}`),
+    ...(o.fumbleContext ? { allFumblePlaysInGame: o.fumbleContext.map((f) => `[${f.clock}|${f.branch}] ${f.text}`) } : {}),
+    ...(o.game ? { game: o.game } : {}),
   };
 }
 function gameDiagJson(a) {
@@ -441,6 +454,87 @@ function renderGameReport(a) {
       <tr><th>Player</th><th class="num">25%</th><th class="num">41.7%</th><th class="num">50%</th><th class="num">75%</th><th class="num">100%</th><th class="num">Full (+OT)</th></tr>
       ${demoRows}</table></div>
   </div>`;
+}
+
+// ---- probe a RANGE of weeks in one run: the whole-season validation ----
+async function probeRange() {
+  const y = $('year').value;
+  const w1 = Number($('week').value) || 1;
+  const w2 = Math.max(w1, Number($('week-to').value) || w1);
+  $('btn-range').disabled = true;
+  $('report').innerHTML = '';
+  const weeksOut = [];
+  const failedOutliers = [];
+  let totalLines = 0, totalStrict = 0, totalGames = 0, totalPassed = 0;
+  for (let w = w1; w <= w2; w++) {
+    let sb2;
+    $('status').textContent = `Week ${w}: loading scoreboard…`;
+    try { sb2 = await fetchJson(`${API}/scoreboard?dates=${y}&seasontype=2&week=${w}`); }
+    catch (err) { weeksOut.push({ week: w, error: err.message }); continue; }
+    const finals = (sb2.events || []).map((ev) => {
+      const comp = ev.competitions?.[0] || {};
+      const home = comp.competitors?.find((c) => c.homeAway === 'home');
+      const away = comp.competitors?.find((c) => c.homeAway === 'away');
+      return { id: ev.id, name: `${away?.team?.abbreviation} @ ${home?.team?.abbreviation}`,
+        final: ev.status?.type?.state === 'post' };
+    }).filter((e) => e.final);
+    const rows = [];
+    for (let i = 0; i < finals.length; i++) {
+      $('status').textContent = `Week ${w}: ${finals[i].name} (${i + 1}/${finals.length})…`;
+      try {
+        const summary = await fetchJson(`${API}/summary?event=${finals[i].id}`);
+        rows.push(analyzeGame(summary, finals[i]));
+      } catch (err) { rows.push({ error: err.message, evMeta: finals[i] }); }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const good = rows.filter((r) => !r.error);
+    totalGames += rows.length;
+    totalPassed += good.filter((r) => r.pass).length;
+    totalLines += good.reduce((n, r) => n + r.players.length, 0);
+    const wkStrict = good.reduce((n, r) => n + r.deep.strictFails, 0);
+    totalStrict += wkStrict;
+    for (const r of good) {
+      for (const o of r.deep.outliers) {
+        if (o.issues.length) failedOutliers.push({ ...o, game: `wk${w} ${r.evMeta.name}` });
+      }
+    }
+    weeksOut.push({
+      week: w, games: rows.length,
+      passed: good.filter((r) => r.pass).length,
+      strictFails: wkStrict,
+      maxDrift: Math.round(Math.max(0, ...good.map((r) => r.max)) * 10) / 10,
+      failing: rows.filter((r) => r.error || !r.pass)
+        .map((r) => r.evMeta.name + (r.error ? ` (fetch: ${r.error})` : '')),
+    });
+  }
+  $('btn-range').disabled = false;
+  $('status').textContent = '';
+  failedOutliers.sort((a, b) => b.drift - a.drift);
+  const overall = totalStrict === 0 && totalPassed === totalGames && totalGames > 0;
+  const json = JSON.stringify({
+    season: y, weeks: weeksOut,
+    totals: { games: totalGames, passed: totalPassed, playerLines: totalLines, strictPlayerFailures: totalStrict },
+    strictFailures: failedOutliers.slice(0, 30).map(compactOutlier),
+  }, null, 1);
+  const wkRows = weeksOut.map((wk) => wk.error
+    ? `<tr><td class="num">${wk.week}</td><td colspan="4" class="bad">${esc(wk.error)}</td></tr>`
+    : `<tr><td class="num">${wk.week}</td><td class="num">${wk.passed}/${wk.games}</td>
+       <td class="num ${wk.strictFails ? 'bad' : 'ok'}">${wk.strictFails}</td>
+       <td class="num">${wk.maxDrift.toFixed(1)}</td>
+       <td style="white-space:normal;font-size:12px" class="${wk.failing.length ? 'bad' : 'ok'}">${wk.failing.length ? esc(wk.failing.join(', ')) : '—'}</td></tr>`).join('');
+  $('report').innerHTML = `
+    <div class="verdict ${overall ? 'pass' : 'fail'}">${overall ? 'RANGE PASS' : 'RANGE FAIL'} — weeks ${w1}–${w2}: ${totalPassed}/${totalGames} games pass
+      <small><b>strict player-level failures: ${totalStrict} (need 0)</b> · ${totalLines} scored player-lines</small>
+    </div>
+    <div class="card"><h2>Combined diagnostic report (copy &amp; paste back to Claude)</h2>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('diag-json').value).then(()=>this.textContent='Copied ✓')">Copy to clipboard</button>
+      <textarea id="diag-json" readonly style="width:100%;height:180px;margin-top:8px;background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;font-family:var(--mono);font-size:11px">${esc(json)}</textarea>
+    </div>
+    <div class="card"><h2>Per-week results (load a single week above for full per-game forensics)</h2>
+      <div class="scroll"><table>
+        <tr><th class="num">Week</th><th class="num">Games pass</th><th class="num">Strict fails</th><th class="num">Max drift</th><th>Failing games</th></tr>
+        ${wkRows}</table></div>
+    </div>`;
 }
 
 // ---- probe every final game in the loaded week ----

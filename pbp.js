@@ -324,8 +324,12 @@
       return 'fg';
     }
     if (xpIdx >= 0) {
-      const kicker = (xpIdx > 0 && matchEnding(entries, key.slice(0, key.indexOf(' extra point')), offense))
-        || firstMatch(entries, key, 0, offense);
+      // NOT offense-restricted: after a punt/kick RETURN touchdown the play
+      // sits in the kicking team's drive but the XP belongs to the scoring
+      // (receiving) team's kicker. matchEnding's anchoring (the name right
+      // before "extra point") is the safety here, not the team filter.
+      const kicker = (xpIdx > 0 && matchEnding(entries, key.slice(0, key.indexOf(' extra point')), null))
+        || firstMatch(entries, key, 0, null);
       if (!kicker) return 'xp-nokicker';
       const k = get(kicker.id);
       k.xpAtt++;

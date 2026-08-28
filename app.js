@@ -1097,6 +1097,21 @@ function scaleStats(stats, f) {
   }
   return out;
 }
+// Self-check before trusting a reconstruction: rebuild the player's FULL
+// game from play-by-play and compare to his official box line. Discrete
+// scoring events must be exact and yardage within 2 fantasy pts (the same
+// strict criterion the probe enforces). Any disagreement demotes the
+// settlement to flagged estimation — a text-parsing quirk in one game can
+// downgrade one swap's precision label, never corrupt a score.
+function reconAgreesWithBox(full, box) {
+  for (const k of ['passTD', 'rushTD', 'recTD', 'passInt', 'rec', 'fumLost', 'fgMade', 'fgBonus', 'xpMade']) {
+    if ((full[k] || 0) !== (box[k] || 0)) return false;
+  }
+  const yd = Math.abs((full.passYds || 0) - (box.passYds || 0)) / 25
+    + Math.abs((full.rushYds || 0) - (box.rushYds || 0)) / 10
+    + Math.abs((full.recYds || 0) - (box.recYds || 0)) / 10;
+  return yd <= 2;
+}
 async function settleSwap(sw, week) {
   const E = swapEffBoundary(sw);
   const p = nflPlayers.get(sw.in_player_id);
@@ -1110,8 +1125,12 @@ async function settleSwap(sw, week) {
         const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${ev.id}`);
         if (res.ok) {
           const summary = await res.json();
-          const stats = PBP.reconstructAt(summary, E)[sw.in_player_id] || PBP.zero();
-          patch = { in_stats_at_boundary: stats, boundary_status: 'reconstructed' };
+          const atE = PBP.reconstructAt(summary, E)[sw.in_player_id] || PBP.zero();
+          const fullRecon = PBP.reconstructAt(summary, 99)[sw.in_player_id] || PBP.zero();
+          const box = statRow(sw.in_player_id, week)?.stats || {};
+          if (reconAgreesWithBox(fullRecon, box)) {
+            patch = { in_stats_at_boundary: atE, boundary_status: 'reconstructed' };
+          }
         }
       } catch (err) { console.warn('boundary reconstruction failed', err); }
     }
