@@ -32,8 +32,9 @@
 (function () {
   'use strict';
 
-  // GSIS-style team abbreviations (used inside play text) vs ESPN's
-  const ABBR_FIX = { BLT: 'BAL', ARZ: 'ARI', CLV: 'CLE', HST: 'HOU' };
+  // GSIS-style team abbreviations (used inside play text) vs ESPN's box
+  // score abbreviations (LA/WAS in text vs LAR/WSH in the box)
+  const ABBR_FIX = { BLT: 'BAL', ARZ: 'ARI', CLV: 'CLE', HST: 'HOU', LA: 'LAR', WAS: 'WSH' };
   const normTeam = (t) => { const u = String(t || '').toUpperCase(); return ABBR_FIX[u] || u; };
 
   // ---- clock helpers ----
@@ -175,6 +176,56 @@
     }
     return best;
   }
+  // Ball-carriers are ANCHORED: the rusher opens the text, the receiver
+  // directly follows " to ". Match only within a short window from that
+  // anchor so tacklers named later can never be grabbed. Two tiers: the
+  // drive's offense first, then any team — ESPN occasionally files a play
+  // under the wrong drive, and the unrestricted-but-anchored tier recovers
+  // it without opening the door to defenders in tackle notes.
+  function windowMatch(entries, textKey, from, span, offense) {
+    const lim = Math.min(textKey.length, from + span);
+    for (let i = from; i < lim; i++) {
+      const m = matchAt(entries, textKey, i, offense);
+      if (m) return { ...m, idx: i };
+    }
+    return null;
+  }
+  const anchorMatch = (entries, textKey, from, span, offense) =>
+    windowMatch(entries, textKey, from, span, offense) || windowMatch(entries, textKey, from, span, null);
+
+  // yardline reference -> distance from the offense's own goal line
+  function spotPos(team, n, offense) {
+    if (!team) return 50;
+    return normTeam(team) === offense ? Number(n) : 100 - Number(n);
+  }
+  // An accepted penalty on the OFFENSE enforced at an in-play spot (the play
+  // stands — no "No Play") truncates the gain at the spot of the foul, and a
+  // nullified touchdown is enforced the same way:
+  // counted = enforcement spot − start of play.
+  function penaltyClipYds(seg, yds, wasTd, offense) {
+    if (yds == null || yds <= 0 || !offense) return yds;
+    // tempered: crosses the dots in player initials ("LV-J.Bech,") but can
+    // never bridge from a declined penalty into a later clause's "enforced"
+    const re = /penalty on ([a-z]{2,4})-(?:(?!penalty on)[\s\S])*?enforced (at [^.]*?)(?=\.|$)/g;
+    let m;
+    while ((m = re.exec(seg))) {
+      if (normTeam(m[1]) !== offense) continue;
+      if (/between downs/.test(m[2])) continue;
+      const spot = m[2].match(/at (?:([a-z]{2,4}) )?(\d+)/);
+      if (!spot) continue;
+      let endPos;
+      if (wasTd) endPos = 100;
+      else {
+        const ends = [...seg.matchAll(/(?:to|at) (?:([a-z]{2,4}) )?(\d+) for /g)];
+        if (!ends.length) return yds;
+        const e = ends[ends.length - 1];
+        endPos = spotPos(e[1], e[2], offense);
+      }
+      const enfPos = spotPos(spot[1], spot[2], offense);
+      return Math.max(0, Math.min(yds, enfPos - (endPos - yds)));
+    }
+    return yds;
+  }
 
   // ---- per-play stat extraction (fantasy-relevant only) ----
   const zero = () => ({
@@ -212,6 +263,11 @@
     const elig = low.lastIndexOf('reported in as eligible.');
     if (elig >= 0) return creditText(text.slice(elig + 24), play, entries, acc, ctx);
 
+    // "Direct snap to X." preamble: the snap recipient is not necessarily
+    // the ball-carrier — parse the sentence that follows it
+    const dsm = low.match(/direct snap to .*?\.(?=\s)/);
+    if (dsm) return creditText(text.slice(dsm.index + dsm[0].length), play, entries, acc, ctx);
+
     // a two-point attempt never counts, but the TD before it in the same
     // text does — truncate and recurse on the part before the marker
     const tpIdx = (() => { const i = low.indexOf('two-point'); return i >= 0 ? i : low.indexOf('two point'); })();
@@ -235,8 +291,18 @@
       const ri = low.search(/recovered by [a-z]{2,4}-/);
       const pi = low.search(/penalty/);
       if (fi >= 0 && ri > fi && (pi < 0 || ri < pi)) {
-        fumbleCheck(low, nameKey(text), entries, acc, null, offense);
-        return 'no-play+fumble';
+        // The turnover survives the flag only when the penalty is ON the
+        // recovering team and is a RETURN-phase foul (a block or roughness
+        // after the recovery). A play-phase foul (defensive holding,
+        // offside, ...) wipes the fumble with the rest of the play.
+        const recTeam = (low.match(/recovered by ([a-z]{2,4})-/) || [])[1];
+        const penTeam = pi >= 0 ? (low.slice(pi).match(/penalty on ([a-z]{2,4})-/) || [])[1] : null;
+        const returnFoul = pi >= 0
+          && /illegal block|unnecessary roughness|unsportsmanlike|face mask|horse collar|taunting/.test(low.slice(pi));
+        if (pi < 0 || (recTeam && penTeam && normTeam(recTeam) === normTeam(penTeam) && returnFoul)) {
+          fumbleCheck(low, nameKey(text), entries, acc, null, offense);
+          return 'no-play+fumble';
+        }
       }
       return 'no-play';            // nullified by penalty
     }
@@ -245,21 +311,30 @@
     // `key` (digits stripped) is only for NAME matching; every numeric or
     // phrase predicate parses `low`, which keeps digits.
     const key = nameKey(text);
-    const td = /touchdown/.test(low);
+    // "TOUCHDOWN NULLIFIED by Penalty": no score — the yards are clipped at
+    // the enforcement spot by penaltyClipYds. And a TD whose text has a
+    // FUMBLE before it belongs to the defender who returned it, never to
+    // the offense.
+    const hadTd = /touchdown/.test(low);
+    const nullified = /touchdown nullified/.test(low);
+    const fumIdx = low.search(/fumbles/);
+    const td = hadTd && !nullified && !(fumIdx >= 0 && fumIdx < low.indexOf('touchdown'));
     const get = (id) => (acc[id] ||= zero());
-    const ydsMatch = () => {
-      let m = low.match(/for (-?\d+) (?:yards?|yds?)\b/);
+    const ydsMatch = (seg = low) => {
+      let m = seg.match(/for (-?\d+) (?:yards?|yds?)\b/);
       if (m) return Number(m[1]);
-      m = low.match(/for a loss of (\d+) (?:yards?|yds?)\b/);
+      m = seg.match(/for a loss of (\d+) (?:yards?|yds?)\b/);
       if (m) return -Number(m[1]);
-      if (/for no gain/.test(low)) return 0;
+      if (/for no gain/.test(seg)) return 0;
       return null;
     };
 
     // TD play with the extra point merged into the same text: split at the
-    // end of the TOUCHDOWN sentence, credit both halves
+    // end of the TOUCHDOWN sentence, credit both halves. (hadTd, not td: a
+    // defensive return TD's extra point is real even though the offense
+    // gets no touchdown credit.)
     const xpIdx = low.indexOf(' extra point');
-    if (td && xpIdx > 0) {
+    if (hadTd && !nullified && xpIdx > 0) {
       const tdDot = low.indexOf('.', low.indexOf('touchdown'));
       if (tdDot > 0 && tdDot < xpIdx) {
         creditText(text.slice(tdDot + 1), play, entries, acc, ctx);
@@ -356,18 +431,27 @@
     // like "C.Humphrey ... recovered by KC-P.Mahomes" must not be matched)
     if (/ pass /.test(low) || /^(\(.*?\)\s*)?\S+.*? pass(ed)? /.test(low)) {
       const kp = key.indexOf(' pass ');
-      const passer = (kp > 0 ? matchEnding(entries, key.slice(0, kp), offense) : null) || firstMatch(entries, key, 0, offense);
+      // anchored only — never scan the whole text (a tackler must not
+      // become the passer when the drive's offense label is wrong)
+      const passer = kp > 0
+        ? (matchEnding(entries, key.slice(0, kp), offense) || matchEnding(entries, key.slice(0, kp), null))
+        : anchorMatch(entries, key, 0, 30, offense);
       if (!passer) return 'pass-no-passer';
       const p = get(passer.id);
       if (/intercepted/.test(low)) { p.passAtt++; p.passInt++; return 'pass-int'; }
       if (/incomplete/.test(low)) { p.passAtt++; return 'pass-incomplete'; }
       const toIdx = key.indexOf(' to ', kp >= 0 ? kp : 0);
-      const receiver = toIdx >= 0 ? firstMatch(entries, key, toIdx + 4, offense) : null;
-      const yds = ydsMatch();
+      const receiver = toIdx >= 0 ? anchorMatch(entries, key, toIdx + 4, 16, offense) : null;
+      // yardage and penalty clipping read only the text from " pass " on —
+      // a botched-snap preamble's "for -5 yards" must not be the reception
+      const lowKp = low.indexOf(' pass ');
+      const passSeg = lowKp >= 0 ? low.slice(lowKp) : low;
+      let yds = ydsMatch(passSeg);
       if (yds == null) { // completed but yardage not parseable (rare)
         p.passAtt++; p.passComp++;
         return 'pass-no-yds';
       }
+      yds = penaltyClipYds(passSeg, yds, hadTd, offense);
       p.passAtt++; p.passComp++; p.passYds += yds;
       let carrier = receiver ? receiver.id : passer.id;
       let scorer = receiver;
@@ -403,13 +487,25 @@
     }
 
     // sacks: no fantasy-relevant offense stats in our model
-    if (/sacked/.test(low)) { fumbleCheck(low, key, entries, acc, null, offense); return 'sack'; }
+    if (/sacked/.test(low)) {
+      const qb = anchorMatch(entries, key, 0, 30, offense);
+      fumbleCheck(low, key, entries, acc, qb ? qb.id : null, offense);
+      return 'sack';
+    }
 
-    // rushes (incl. scrambles and kneels; word-boundaried keywords)
+    // rushes (incl. scrambles and kneels; word-boundaried keywords).
+    // The rusher opens the text: anchored window only, so a tackler in the
+    // parentheses can never be the ball-carrier.
     if (/\b(left|right|middle|end|guard|tackle|scrambles?|kneels?|rush|rushes|rushed)\b/.test(low)) {
-      const rusher = firstMatch(entries, key, 0, offense);
-      const yds = ydsMatch();
-      if (!rusher || yds == null) return !rusher ? 'rush-no-rusher' : 'rush-no-yds';
+      const rusher = anchorMatch(entries, key, 0, 30, offense);
+      let yds = ydsMatch();
+      if (!rusher) return 'rush-no-rusher';
+      if (yds == null) {
+        // an aborted snap still loses the ball ("C.Rush FUMBLES (Aborted)...")
+        fumbleCheck(low, key, entries, acc, rusher.id, offense);
+        return 'rush-no-yds';
+      }
+      yds = penaltyClipYds(low, yds, hadTd, offense);
       const r = get(rusher.id);
       r.rushAtt++; r.rushYds += yds;
       if (td) { r.rushTD++; if (ctx) ctx.td.add(tdKey(play, rusher.id)); }
@@ -447,7 +543,7 @@
 
   function fumbleCheck(low, key, entries, acc, carrierId, offense) {
     if (!/fumbles|muffs/.test(low)) return;
-    const found = carrierId ? { id: carrierId } : firstMatch(entries, key, 0, offense);
+    const found = carrierId ? { id: carrierId } : anchorMatch(entries, key, 0, 30, offense);
     const who = found && entries.find((e) => e.id === found.id);
     if (!who) return;
     // lost only if the RECOVERING team differs from the carrier's team;
