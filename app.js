@@ -1310,7 +1310,7 @@ function openLiveSub(slot) {
             <div class="p-meta">${gameMetaHtml(p, week)} · <b style="color:var(--purple)">${liveNote}</b></div>
           </div></div>`;
       }).join('') || '<p class="empty-note">No eligible bench player — you can\'t sit a player without a replacement.</p>'}
-    </div>`);
+    </div>`, 'coach-loom');
 }
 
 async function confirmLiveSub(slot, inPid) {
@@ -2055,8 +2055,10 @@ function renderGamelogTable(gl) {
 }
 
 // ---------- modal & toast ----------
-function openModal(html) {
-  $('modal-box').innerHTML = html;
+function openModal(html, klass = '') {
+  const box = $('modal-box');
+  box.className = 'modal-box' + (klass ? ' ' + klass : '');
+  box.innerHTML = html;
   $('modal-backdrop').classList.remove('hidden');
 }
 function closeModal() { $('modal-backdrop').classList.add('hidden'); }

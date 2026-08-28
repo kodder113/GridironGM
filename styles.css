@@ -329,6 +329,27 @@ tr.me td { background: rgba(34,197,94,.07); }
 .subnote b { color: var(--purple); }
 
 /* ===== The Coach ===== */
+/* looming behind the live-sub modal */
+.modal-box.coach-loom { position: relative; overflow: hidden; }
+.modal-box.coach-loom::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: url('assets/coach.png') no-repeat right -50px top 40px / 360px auto;
+  opacity: .13;
+  mask-image: linear-gradient(to left, black 25%, transparent 80%);
+  -webkit-mask-image: linear-gradient(to left, black 25%, transparent 80%);
+}
+/* watermark over the draft room */
+#tab-draft { position: relative; }
+#tab-draft::before {
+  content: ''; position: fixed; right: 6vw; bottom: -30px; width: 480px; height: 660px;
+  background: url('assets/coach.png') no-repeat bottom center / contain;
+  opacity: .12; pointer-events: none; z-index: 0;
+}
+#tab-draft > * { position: relative; z-index: 1; }
+/* draft panels are slightly translucent so the coach ghosts through */
+#tab-draft .panel, #tab-draft .on-clock { background: rgba(16, 16, 26, .84); backdrop-filter: blur(2px); }
+@media (max-width: 900px) { #tab-draft::before { width: 300px; height: 420px; opacity: .06; } }
+
 .coach-stage { position: relative; width: 190px; margin: 0 auto; }
 .coach-hero { width: 190px; height: 220px; display: block; margin: 0 auto; filter: drop-shadow(0 10px 30px rgba(124,58,237,.4)); }
 .coach-photo {
