@@ -2742,25 +2742,29 @@ const PHRASES = {
   grit: {
     SUB: [
       (c) => `${surname()}, I've seen enough. ${c.out.name} has ${fmtPts(c.outPts)} points and he's fading. ${c.inLine} I'm making the call: switch him.`,
-      (c) => `We're not dying with ${c.out.name} today — ${fmtPts(c.outPts)} points isn't going to cut it. ${c.inLine} Make the switch.`,
-      (c) => `Gut and numbers agree, ${surname()}: ${c.out.name} isn't your guy today. ${c.inLine} Get him in there.`,
+      (c) => `We're not dying with ${c.out.name} today — ${fmtPts(c.outPts)} points isn't cutting it. ${c.inLine} Make the switch.`,
+      (c) => `Gut and the numbers say the same thing, ${surname()}: ${c.out.name} doesn't have it today. ${c.inLine} Get him out of my lineup.`,
     ],
     HOLD: [
-      (c) => `Don't panic, ${surname()}. Down ${fmtPts(c.deficit)}, but you've still got ${c.remaining} player${c.remaining === 1 ? '' : 's'} with football left. We're a ${c.band.toLowerCase()} in my book. Hold the line.`,
+      (c) => `Don't panic, ${surname()}. Down ${fmtPts(c.deficit)}, but you've still got ${c.remaining} player${c.remaining === 1 ? '' : 's'} with football left. We're a ${String(c.band).toLowerCase()} in my book. Hold the line.`,
       (c) => `Breathe. ${fmtPts(c.deficit)} down looks worse than it is — ${c.remaining} of your guys haven't finished cooking. Keep the lineup as-is.`,
+      (c) => `Quit staring at the scoreboard, ${surname()}. ${c.remaining} of your guys still have football to play and I like our side of it. Hold.`,
     ],
     PROTECT: [
       (c) => `You're up ${fmtPts(c.lead)}, ${surname()}. ${c.band}. Don't get cute — we protect this one.`,
-      (c) => `Lead's ours: +${fmtPts(c.lead)} and we're ${c.band.toLowerCase()}. No hero moves. Sit tight.`,
+      (c) => `Lead's ours: +${fmtPts(c.lead)} and we're the ${String(c.band).toLowerCase()}. No hero moves. Sit tight.`,
     ],
     FIX: [
-      (c) => `${surname()}! Your ${c.slotLabel} spot is ${c.issueText}. Fix it before kickoff — free points are walking out the door.`,
+      (c) => `${surname()}! Your ${c.slotLabel} is ${c.issueText}. That's dead weight in my lineup. Fix it now.`,
+      (c) => `What are we doing here, ${surname()}? Your ${c.slotLabel} is ${c.issueText}. I don't start empty jerseys — fix it.`,
+      (c) => `Kickoff's coming and your ${c.slotLabel} is ${c.issueText}. Unacceptable. Move.`,
     ],
     START: [
-      (c) => `Looking at your ${c.slotLabel}: ${c.inn.name} projects about ${fmtPts(c.gain)} more than ${c.out.name} this week. I'd start him. Your call, ${surname()}.`,
+      (c) => `Why is ${c.inn.name} riding my bench, ${surname()}? He projects ${fmtPts(c.gain)} more than ${c.out.name} this week. Start him.`,
+      (c) => `${c.out.name} over ${c.inn.name}? Not on my sideline — ${c.inn.name} projects ${fmtPts(c.gain)} better. Make the start.`,
     ],
     calm: {
-      'Strong Favorite': (s) => `We're in command, ${surname()}. Stay sharp — I'll bark if anything changes.`,
+      'Strong Favorite': () => `We're in command, ${surname()}. Stay sharp — I'll bark if anything changes.`,
       'Favored': () => `We're ahead of this thing. I like our spots.`,
       'Toss-Up': () => `This one's a street fight. I'm watching every snap.`,
       'Underdog': () => `They've got the edge — for now. I'm hunting for our move.`,
@@ -2770,28 +2774,32 @@ const PHRASES = {
   },
   analyst: {
     SUB: [
-      (c) => `${c.out.name} is at ${fmtPts(c.outPts)} vs. ~${fmtPts(c.expSoFar)} expected by this point of the game. ${c.inLine} Projected gain: ${fmtPts(c.gain)}. Expected value favors the substitution — I recommend it.`,
-      (c) => `Pace analysis: ${c.out.name} is tracking well under baseline. ${c.inLine} Risk-adjusted, the switch projects +${fmtPts(c.gain)}. Recommend: substitute.`,
+      (c) => `${c.out.name} is at ${fmtPts(c.outPts)} versus approximately ${fmtPts(c.expSoFar)} expected by this point of the game. ${c.inLine} Projected gain: ${fmtPts(c.gain)}. Expected value favors the substitution — I recommend it.`,
+      (c) => `Pace analysis: ${c.out.name} is tracking well under baseline. ${c.inLine} Risk-adjusted, the switch projects +${fmtPts(c.gain)}. Recommendation: substitute.`,
+      (c) => `Substitution analysis at ${c.slotLabel}: ${c.out.name} has produced ${fmtPts(c.outPts)} against an expected ${fmtPts(c.expSoFar)}. ${c.inLine} The projected differential is +${fmtPts(c.gain)}. I recommend the change.`,
     ],
     HOLD: [
-      (c) => `Deficit: ${fmtPts(c.deficit)}. Your remaining players carry more expected production than your opponent's. Model reads this as a ${c.band.toLowerCase()}. No action recommended.`,
+      (c) => `Current deficit: ${fmtPts(c.deficit)}. Your remaining players carry more expected production than your opponent's. The model reads this as a ${String(c.band).toLowerCase()}. No action recommended.`,
       (c) => `The margin is ${fmtPts(c.deficit)}, but expected points remaining favor holding. Classification: ${c.band}. Recommendation: no change.`,
     ],
     PROTECT: [
-      (c) => `Current lead: ${fmtPts(c.lead)}. Model classification: ${c.band}. Variance is your enemy now — recommend no lineup changes.`,
+      (c) => `Current lead: ${fmtPts(c.lead)}. Model classification: ${c.band}. Variance is your enemy now — I recommend no lineup changes.`,
+      (c) => `You lead by ${fmtPts(c.lead)} and the model classifies you as ${String(c.band).toLowerCase()}. The optimal strategy is unchanged personnel — added variance only helps your opponent.`,
     ],
     FIX: [
-      (c) => `Data issue in your lineup: the ${c.slotLabel} slot is ${c.issueText}. Expected value of fixing it is strictly positive.`,
+      (c) => `Your ${c.slotLabel} is ${c.issueText} and projects zero points. Replacing him with an active option strictly improves expected lineup output. I recommend the change.`,
+      (c) => `Lineup audit: the ${c.slotLabel} slot is ${c.issueText}. Any active replacement is expected-value positive. Recommend resolving this before kickoff.`,
     ],
     START: [
-      (c) => `Baseline comparison at ${c.slotLabel}: ${c.inn.name} projects ${fmtPts(c.gain)} higher than ${c.out.name}. Recommend the start.`,
+      (c) => `Baseline comparison at ${c.slotLabel}: ${c.inn.name} projects ${fmtPts(c.gain)} higher than ${c.out.name} this week. Recommend the start.`,
+      (c) => `Projection delta at ${c.slotLabel}: +${fmtPts(c.gain)} in favor of ${c.inn.name}. Starting him is the higher expected-value lineup.`,
     ],
     calm: {
       'Strong Favorite': () => `Model classification: strong favorite. Monitoring for variance events.`,
       'Favored': () => `You're favored on expected points. Watching the live data.`,
       'Toss-Up': () => `This projects as a toss-up. Small edges will decide it — I'm tracking them.`,
       'Underdog': () => `You're the underdog on current projections. Evaluating upside options.`,
-      'Long Shot': () => `Low win probability band. Looking for high-variance paths back.`,
+      'Long Shot': () => `Low win-probability band. Looking for high-variance paths back.`,
       none: () => `Monitoring your roster. Recommendations will surface when the data justifies them.`,
     },
   },
@@ -2839,6 +2847,9 @@ async function runCoachEngine(context) {
           margin: sit.margin, band: sit.band, myPts: sit.myPts, oppPts: sit.oppPts,
           outPts: sig.outPts ?? null, inPts: sig.inPts ?? null,
           outPid: sig.out ? sig.out.id : null, inPid: sig.inn ? sig.inn.id : null,
+          expSoFar: sig.expSoFar ?? null, minsToKick: sig.minsToKick ?? null,
+          deficit: sig.deficit ?? null, remaining: sig.remaining ?? null,
+          sigBand: sig.band ?? null, lead: sig.lead ?? null, issue: sig.issue ?? null,
         },
         dedupe_key: sig.dedupe,
       };
@@ -2849,6 +2860,32 @@ async function runCoachEngine(context) {
     renderCoachSurfaces(sit, context);
     maybeScoreRecs();
   } catch (err) { console.warn('coach engine', err); }
+}
+
+// Rebuild a speakable signal from a persisted rec, so the message always
+// renders in the CURRENTLY selected coach's voice (the ledger keeps the
+// original message for attribution).
+function sigFromRec(r) {
+  const sn = r.situation || {};
+  return {
+    type: r.rec_type, slot: r.slot, dedupe: r.dedupe_key,
+    out: r.out_player_id ? nflPlayers.get(r.out_player_id) : null,
+    inn: r.in_player_id ? nflPlayers.get(r.in_player_id) : null,
+    gain: r.projected_delta != null ? Number(r.projected_delta) : null,
+    outPts: sn.outPts, inPts: sn.inPts, expSoFar: sn.expSoFar,
+    minsToKick: sn.minsToKick, deficit: sn.deficit, remaining: sn.remaining,
+    band: sn.sigBand || sn.band, lead: sn.lead, issue: sn.issue,
+    confidence: r.confidence,
+  };
+}
+function recDisplayMessage(r) {
+  try {
+    const sig = sigFromRec(r);
+    if (sig.type === 'SUB' && (!sig.out || !sig.inn)) return r.message;
+    if (sig.type === 'START' && (!sig.out || !sig.inn)) return r.message;
+    if (sig.type === 'FIX' && !sig.issue) return r.message;
+    return speakRec(sig);
+  } catch { return r.message; }
 }
 
 function activeAlert() {
@@ -2890,7 +2927,7 @@ function renderCoachSurfaces(sit, context) {
     strip.innerHTML = `<div class="coach-stripe" onclick="${alert ? '' : "showTab('matchup')"}">
       <img src="assets/coach.png" class="cs-img" alt="" onerror="this.remove()"/>
       <div class="cs-body"><b>${coach.icon} ${esc(coach.name)}:</b>
-        ${alert ? `<span class="cs-alert">${esc(alert.message)}</span>` : `<span>"${esc(calm)}"</span>`}</div>
+        ${alert ? `<span class="cs-alert">${esc(recDisplayMessage(alert))}</span>` : `<span>"${esc(calm)}"</span>`}</div>
       ${alert ? alertButtonsHtml(alert, true) : '<span class="cs-go">Matchup ›</span>'}
     </div>`;
   }
@@ -2907,7 +2944,7 @@ function alertButtonsHtml(r, compact) {
 
 function renderAlertHtml(r) {
   return `<div class="cd-alert">
-    <div class="cd-say">"${esc(r.message)}"</div>
+    <div class="cd-say">"${esc(recDisplayMessage(r))}"</div>
     ${alertButtonsHtml(r, false)}
   </div>`;
 }

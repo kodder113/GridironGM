@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GGM Coach Simulator (dev only)</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎧</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- The Coach — Gridiron GM is LIVE coaching, so the coach is the face of the app -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <radialGradient id="cGlow" cx="50%" cy="45%" r="55%">
+        <stop offset="0%" stop-color="#8b5cf6" stop-opacity=".55"/>
+        <stop offset="55%" stop-color="#6d28d9" stop-opacity=".22"/>
+        <stop offset="100%" stop-color="#6d28d9" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="cSkin" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="#8a6647"/>
+        <stop offset="45%" stop-color="#b08a5f"/>
+        <stop offset="100%" stop-color="#6e4e33"/>
+      </linearGradient>
+      <linearGradient id="cCap" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#26263a"/>
+        <stop offset="100%" stop-color="#0c0c14"/>
+      </linearGradient>
+      <linearGradient id="cJacket" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#1d1d2c"/>
+        <stop offset="100%" stop-color="#0a0a10"/>
+      </linearGradient>
+      <linearGradient id="cSilver" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#f4f4fa"/>
+        <stop offset="100%" stop-color="#8f8fa8"/>
+      </linearGradient>
+    </defs>
+    <symbol id="coach" viewBox="0 0 200 232">
+      <ellipse cx="100" cy="104" rx="92" ry="96" fill="url(#cGlow)"/>
+      <!-- jacket -->
+      <path d="M18 232 C24 180 60 160 100 158 C140 160 176 180 182 232 Z" fill="url(#cJacket)"/>
+      <path d="M100 168 L100 232" stroke="#3b2f63" stroke-width="3"/>
+      <path d="M82 161 L100 186 L118 161 L100 170 Z" fill="#07070c"/>
+      <!-- neck -->
+      <rect x="87" y="132" width="26" height="30" rx="11" fill="#7d5a3c"/>
+      <!-- head -->
+      <path d="M66 92 C66 60 80 44 100 44 C120 44 134 60 134 92 C134 124 120 150 100 152 C80 150 66 124 66 92 Z" fill="url(#cSkin)"/>
+      <!-- right-side shadow -->
+      <path d="M118 60 C130 78 130 116 116 138 C126 120 128 84 118 60 Z" fill="#3d2a18" opacity=".5"/>
+      <!-- ears -->
+      <ellipse cx="66" cy="100" rx="6" ry="9" fill="#8a6647"/>
+      <ellipse cx="134" cy="100" rx="6" ry="9" fill="#6e4e33"/>
+      <!-- beard: starts at the cheek line, full round chin -->
+      <path d="M70 106 C72 96 76 92 78 96 L78 118 C78 126 84 130 100 130 C116 130 122 126 122 118 L122 96
+               C124 92 128 96 130 106 C132 136 122 158 100 162 C78 158 68 136 70 106 Z" fill="#131318"/>
+      <path d="M84 122 C90 116 110 116 116 122 C112 130 88 130 84 122 Z" fill="#1e1e27"/>
+      <path d="M95 133 L105 133 L103 139 L97 139 Z" fill="#3a3a46"/>
+      <!-- brows / eyes: stern -->
+      <path d="M76 88 L94 91 L94 97 L76 95 Z" fill="#15151b"/>
+      <path d="M124 88 L106 91 L106 97 L124 95 Z" fill="#15151b"/>
+      <ellipse cx="86" cy="101" rx="5" ry="2.8" fill="#17100a"/>
+      <ellipse cx="114" cy="101" rx="5" ry="2.8" fill="#17100a"/>
+      <!-- nose -->
+      <path d="M100 100 L95 117 L105 117 Z" fill="#7d5a3c"/>
+      <!-- cap crown -->
+      <path d="M64 78 C62 40 84 28 100 28 C116 28 138 40 136 78 C124 70 76 70 64 78 Z" fill="url(#cCap)"/>
+      <path d="M78 68 C78 46 90 36 100 36 C110 36 122 46 122 68 C112 62 88 62 78 68 Z" fill="#191926"/>
+      <!-- brim -->
+      <path d="M58 80 C82 68 118 68 142 80 C146 86 141 92 134 90 C112 80 88 80 66 90 C59 92 54 86 58 80 Z" fill="#08080e"/>
+      <!-- GGM cap mark -->
+      <text x="101.5" y="61.5" text-anchor="middle" font-family="Rajdhani, sans-serif" font-weight="700" font-style="italic" font-size="19" fill="#7c3aed" opacity=".9">GGM</text>
+      <text x="100" y="60" text-anchor="middle" font-family="Rajdhani, sans-serif" font-weight="700" font-style="italic" font-size="19" fill="url(#cSilver)">GGM</text>
+      <!-- headset: band over the cap, big cups on the ears, boom mic -->
+      <path d="M50 92 C46 22 154 22 150 92" fill="none" stroke="#0b0b12" stroke-width="12" stroke-linecap="round"/>
+      <path d="M50 90 C48 28 152 28 150 90" fill="none" stroke="#33334a" stroke-width="3" stroke-linecap="round"/>
+      <rect x="38" y="82" width="26" height="42" rx="12" fill="#101018" stroke="#33334a" stroke-width="2"/>
+      <rect x="136" y="82" width="26" height="42" rx="12" fill="#101018" stroke="#33334a" stroke-width="2"/>
+      <rect x="44" y="90" width="14" height="26" rx="7" fill="none" stroke="#8b5cf6" stroke-width="2.5" opacity=".95"/>
+      <rect x="142" y="90" width="14" height="26" rx="7" fill="none" stroke="#8b5cf6" stroke-width="2.5" opacity=".5"/>
+      <!-- mic boom -->
+      <path d="M52 122 C56 142 72 150 90 146" fill="none" stroke="#0b0b12" stroke-width="6" stroke-linecap="round"/>
+      <ellipse cx="94" cy="145" rx="8" ry="5.5" fill="#0b0b12" stroke="#8b5cf6" stroke-width="1.8"/>
+      <!-- purple rim light -->
+      <path d="M133 100 C136 126 128 148 110 160" fill="none" stroke="#a855f7" stroke-width="2.5" opacity=".6" stroke-linecap="round"/>
+      <path d="M138 46 C144 58 146 70 145 80" fill="none" stroke="#a855f7" stroke-width="2" opacity=".45" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="ggm-badge" viewBox="0 0 64 64">
+      <polygon points="32 3 58 17 58 47 32 61 6 47 6 17" fill="#12121d" stroke="#7c3aed" stroke-width="2.5"/>
+      <polygon points="32 9 53 20 53 44 32 55 11 44 11 20" fill="none" stroke="#2c2c44" stroke-width="1.5"/>
+      <text x="33.5" y="40.5" text-anchor="middle" font-family="Rajdhani, sans-serif" font-weight="700" font-style="italic" font-size="21" fill="#7c3aed" opacity=".9">GGM</text>
+      <text x="32" y="39" text-anchor="middle" font-family="Rajdhani, sans-serif" font-weight="700" font-style="italic" font-size="21" fill="url(#cSilver)">GGM</text>
+    </symbol>
+  </svg>
+
+  <!-- ======== AUTH ======== -->
+  <div id="auth-screen" class="screen">
+    <div class="auth-card">
+      <div class="coach-stage">
+        <img src="assets/coach.png" alt="" class="coach-photo"
+          onload="this.parentElement.classList.add('has-photo'); if (this.src.endsWith('.png')) this.classList.add('transparent');"
+          onerror="if (!this.dataset.alt) { this.dataset.alt = 1; this.src = 'assets/coach.jpg'; } else { this.remove(); }"/>
+        <svg class="coach-hero"><use href="#coach"/></svg>
+      </div>
+      <h1 class="auth-title wordmark"><span class="wm-grid">GRIDIRON</span> <span class="wm-gm">GM</span></h1>
+      <p class="tagline">Build. Manage. Dominate.</p>
+      <p class="auth-sub">Fantasy football with <b>Live Coaching</b> — sub your players mid-game, just like a real coach.</p>
+
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" onclick="showAuthTab('login')">Sign In</button>
+        <button id="tab-signup" class="auth-tab" onclick="showAuthTab('signup')">Sign Up</button>
+      </div>
+
+      <form id="login-form" class="auth-form" onsubmit="handleLogin(event)">
+        <label>Email</label>
+        <input type="email" id="login-email" placeholder="you@example.com" required />
+        <button type="submit" class="btn-primary">Sign In</button>
+      </form>
+
+      <form id="signup-form" class="auth-form hidden" onsubmit="handleSignup(event)">
+        <label>Name</label>
+        <input type="text" id="signup-name" placeholder="Your name" required maxlength="40" />
+        <label>Username</label>
+        <input type="text" id="signup-username" placeholder="e.g. gridiron_guru" required maxlength="24" pattern="[A-Za-z0-9_]{3,24}" title="3–24 letters, numbers or underscores" />
+        <label>Email</label>
+        <input type="email" id="signup-email" placeholder="you@example.com" required />
+        <label>Age Group</label>
+        <select id="signup-age" required>
+          <option value="" disabled selected>Select your age group</option>
+          <option>Under 18</option>
+          <option>18–24</option>
+          <option>25–34</option>
+          <option>35–44</option>
+          <option>45–54</option>
+          <option>55–64</option>
+          <option>65+</option>
+        </select>
+        <label>Favorite Football Team</label>
+        <select id="signup-team" required>
+          <option value="" disabled selected>Select your team</option>
+        </select>
+        <button type="submit" class="btn-primary">Create Account</button>
+      </form>
+      <p id="auth-error" class="auth-error hidden"></p>
+    </div>
+  </div>
+
+  <!-- ======== LEAGUE HUB ======== -->
+  <div id="hub-screen" class="screen hidden">
+    <header class="topbar">
+      <div class="brand"><svg class="badge-mini"><use href="#ggm-badge"/></svg> <span class="wordmark"><span class="wm-grid">GRIDIRON</span> <span class="wm-gm">GM</span></span></div>
+      <div class="user-box">
+        <span id="hub-user-chip" class="user-chip"></span>
+        <button class="btn-ghost" onclick="logout()">Sign out</button>
+      </div>
+    </header>
+    <main class="hub-main">
+      <section class="panel">
+        <h2>🏟️ My Leagues</h2>
+        <p class="panel-sub">Leagues you've created or joined</p>
+        <div id="my-leagues"></div>
+      </section>
+
+      <div class="hub-grid">
+        <section class="panel">
+          <h2>➕ Create a League</h2>
+          <form class="stack-form" onsubmit="handleCreateLeague(event)">
+            <label>League Name</label>
+            <input type="text" id="cl-name" placeholder="e.g. Sunday Legends" required maxlength="40" />
+            <label>Number of Teams <span class="hint">(must be even)</span></label>
+            <select id="cl-teams" onchange="updateDivisionOptions()"></select>
+            <label>Divisions</label>
+            <select id="cl-divisions"></select>
+            <label>Playoff Teams <span class="hint">(division winners + wildcards advance)</span></label>
+            <select id="cl-playoffs">
+              <option value="6" selected>6 teams — top 2 seeds get a bye (weeks 15–17)</option>
+              <option value="4">4 teams — semis &amp; championship (weeks 16–17)</option>
+              <option value="2">2 teams — championship game only (week 17)</option>
+            </select>
+            <label>Draft Order</label>
+            <select id="cl-ordermode">
+              <option value="random" selected>Random snake — order revealed at draft start</option>
+              <option value="manual">Commissioner sets the order before the draft</option>
+            </select>
+            <label>Pick Clock <span class="hint">(clock expires → top-ranked player is auto-picked)</span></label>
+            <select id="cl-clock">
+              <option value="0">No limit</option>
+              <option value="30">30 seconds</option>
+              <option value="60">60 seconds</option>
+              <option value="90" selected>90 seconds</option>
+              <option value="120">2 minutes</option>
+            </select>
+            <label>Roster Construction <span class="hint">(spots per team — 0 means the position isn't used)</span></label>
+            <div class="roster-grid" id="cl-roster"></div>
+            <p class="rc-summary" id="cl-roster-summary"></p>
+            <label>Scoring</label>
+            <select id="cl-scoring-preset" onchange="applyScoringPreset('cl')">
+              <option value="ppr" selected>Standard — full PPR (1 pt per reception)</option>
+              <option value="half">Half PPR (0.5 per reception)</option>
+              <option value="std">Standard — non-PPR</option>
+              <option value="custom">Custom — set every point value yourself</option>
+            </select>
+            <details class="scoring-editor" id="cl-scoring-editor">
+              <summary>⚙️ Edit point values (per action, per yard, or per whole chunk of yards)</summary>
+              <div id="cl-scoring-grid"></div>
+            </details>
+            <label>Draft Date &amp; Time</label>
+            <input type="datetime-local" id="cl-draft" required />
+            <label>Your Team Name</label>
+            <input type="text" id="cl-teamname" placeholder="e.g. Bench Warmers" required maxlength="30" />
+            <button type="submit" class="btn-primary">Create League</button>
+            <p class="form-note">The fantasy season runs weeks 1–17 — the NFL's 18 weeks minus one, because nobody plays their starters in Week 18.</p>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>📨 Join a League</h2>
+          <form class="stack-form" onsubmit="handleJoinLeague(event)">
+            <label>Invite Code</label>
+            <input type="text" id="jl-code" placeholder="e.g. K7XQ2M" required maxlength="8" style="text-transform:uppercase" />
+            <label>Your Team Name</label>
+            <input type="text" id="jl-teamname" placeholder="e.g. Couch Coaches" required maxlength="30" />
+            <button type="submit" class="btn-primary">Join League</button>
+            <p class="form-note">Ask your commissioner for the invite code or link.</p>
+          </form>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- ======== LEAGUE ======== -->
+  <div id="league-screen" class="screen hidden">
+    <header class="topbar">
+      <div class="brand clickable" onclick="backToHub()">‹ <svg class="badge-mini"><use href="#ggm-badge"/></svg> <span id="league-title">League</span></div>
+      <nav class="nav" id="league-nav">
+        <button id="nav-team" class="nav-btn" onclick="showTab('team')">My Team</button>
+        <button id="nav-matchup" class="nav-btn" onclick="showTab('matchup')">Matchup</button>
+        <button id="nav-players" class="nav-btn" onclick="showTab('players')">Players</button>
+        <button id="nav-standings" class="nav-btn" onclick="showTab('standings')">Standings</button>
+        <button id="nav-draft" class="nav-btn" onclick="showTab('draft')">Draft</button>
+      </nav>
+      <div class="user-box">
+        <button id="settings-btn" class="btn-ghost hidden" onclick="openLeagueSettings()" title="League settings (commissioner)">⚙️ Rules</button>
+        <button id="refresh-btn" class="btn-ghost" onclick="manualRefresh()" title="Refresh live stats">⟳</button>
+        <span id="user-chip" class="user-chip"></span>
+        <button class="btn-ghost" onclick="logout()">Sign out</button>
+      </div>
+    </header>
+
+    <div class="week-nav" id="week-nav">
+      <button class="week-arrow" onclick="changeWeek(-1)">‹</button>
+      <div id="week-pills" class="week-pills"></div>
+      <button class="week-arrow" onclick="changeWeek(1)">›</button>
+    </div>
+
+    <main>
+      <section id="tab-team" class="view hidden"><div id="team-view"></div></section>
+      <section id="tab-matchup" class="view hidden"><div id="matchup-view"></div></section>
+      <section id="tab-players" class="view hidden">
+        <div class="panel">
+          <div class="pool-controls">
+            <input type="text" id="pool-search" placeholder="🔍 Search players…" oninput="renderPlayersTab()" />
+            <div id="pos-filters" class="pos-filters"></div>
+          </div>
+          <div id="players-pool"></div>
+        </div>
+      </section>
+      <section id="tab-standings" class="view hidden"><div id="standings-view"></div></section>
+      <section id="tab-draft" class="view hidden"><div id="draft-view"></div></section>
+    </main>
+  </div>
+
+  <!-- ======== MODALS ======== -->
+  <div id="modal-backdrop" class="modal-backdrop hidden" onclick="if(event.target===this)closeModal()">
+    <div id="modal-box" class="modal-box"></div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="sim/supamock.js"></script>
+  <script src="app.js"></script>
+  <link rel="stylesheet" href="sim/simulator.css" />
+  <div id="sim-root"></div>
+  <script src="sim/simulator.js"></script>
+</body>
+</html>
