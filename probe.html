@@ -198,6 +198,24 @@ const STAT_W = { passYds: .04, passTD: 4, passInt: 2, rushYds: .1, rushTD: 6,
   rec: 1, recYds: .1, recTD: 6, fumLost: 2, fgMade: 3, fgBonus: 1, xpMade: 1 };
 const nonzero = (st) => { const o = {}; for (const k in st) if (st[k]) o[k] = st[k]; return o; };
 
+// ---- STRICT settlement-grade criterion (player-level, worst case) ----
+// (a) discrete scoring events must be EXACT — one missed TD is 6 points;
+// (b) total yardage drift <= 2.0 fantasy pts per player;
+// (c) no credit to a player absent from the official box score.
+const DISCRETE = ['passTD', 'rushTD', 'recTD', 'passInt', 'rec', 'fumLost', 'fgMade', 'fgBonus', 'xpMade'];
+function strictIssues(b, r, inBox) {
+  const issues = [];
+  for (const k of DISCRETE) {
+    if ((b[k] || 0) !== (r[k] || 0)) issues.push(`${k} box ${b[k] || 0} vs recon ${r[k] || 0}`);
+  }
+  const yd = Math.abs((r.passYds || 0) - (b.passYds || 0)) / 25
+    + Math.abs((r.rushYds || 0) - (b.rushYds || 0)) / 10
+    + Math.abs((r.recYds || 0) - (b.recYds || 0)) / 10;
+  if (yd > 2) issues.push(`yardage drift ${yd.toFixed(1)} pts (cap 2.0)`);
+  if (!inBox && fantasyPts(r) > 0.5) issues.push('credited but NOT in official box score');
+  return issues;
+}
+
 function deepDiagnose(summary, box, reconFull) {
   const traces = PBP.tracePlays(summary);
   const entries = PBP.buildMatcher(summary);
@@ -221,7 +239,8 @@ function deepDiagnose(summary, box, reconFull) {
       catErrAll[k] = (catErrAll[k] || 0) + Math.abs((r[k] || 0) - (b[k] || 0)) * STAT_W[k];
     }
     const drift = Math.abs(fantasyPts(r) - fantasyPts(b));
-    if (drift < 3) continue;
+    const issues = strictIssues(b, r, !!box[id]);
+    if (drift < 3 && !issues.length) continue;
     const cats = [];
     for (const k of Object.keys(STAT_W)) {
       const d = (r[k] || 0) - (b[k] || 0);
@@ -241,13 +260,14 @@ function deepDiagnose(summary, box, reconFull) {
       }));
     outliers.push({
       id, name: (box[id] || byId[id] || { name: id }).name, team: (box[id] || {}).team || '?',
-      boxPts: fantasyPts(b), reconPts: fantasyPts(r), drift, cats, plays,
+      boxPts: fantasyPts(b), reconPts: fantasyPts(r), drift, cats, plays, issues,
       boxOnly: !box[id] ? 'NOT IN BOX SCORE (misattributed credit?)' : null,
     });
   }
   outliers.sort((x, y) => y.drift - x.drift);
   for (const k of Object.keys(catErrAll)) catErrAll[k] = Math.round(catErrAll[k] * 10) / 10;
-  return { branchCounts, suspicious, outliers, catErrAll };
+  const strictFails = outliers.filter((o) => o.issues.length).length;
+  return { branchCounts, suspicious, outliers, catErrAll, strictFails };
 }
 
 // ---- compact diagnostic JSON for reporting back ----
@@ -258,6 +278,7 @@ function compactOutlier(o) {
   return {
     player: `${o.name} (${o.team})`, box: o.boxPts, recon: o.reconPts,
     drift: Math.round(o.drift * 10) / 10,
+    strictIssues: o.issues,
     ...(o.boxOnly ? { note: o.boxOnly } : {}),
     cats: o.cats.map((c) => `${c.k}: box ${c.box} vs recon ${c.recon} (${c.errPts} err pts)`),
     uncreditedMentions: unc.slice(0, 12).map((p) =>
@@ -311,7 +332,10 @@ function analyzeGame(summary, evMeta) {
     full: p.reconPts,
   }));
   const deep = deepDiagnose(summary, box, reconFull);
-  const pass = diag.clockedPct >= 98 && median <= 1.5 && (!ls || ls.allOk);
+  // STRICT settlement-grade verdict: full clock coverage, clocks proven
+  // against linescores, and ZERO player-lines violating the strict
+  // criterion (exact discrete events, <=2 pts yardage drift, no phantoms)
+  const pass = diag.clockedPct >= 98 && (!ls || ls.allOk) && deep.strictFails === 0;
   return { diag, players, median, max, totals, ls, demo, deep, pass, evMeta };
 }
 
@@ -363,13 +387,13 @@ function renderGameReport(a) {
         <td style="white-space:normal;font-family:var(--mono);font-size:11px">${esc(p.text)}</td></tr>`).join('');
     return `<details style="margin-bottom:10px"><summary style="cursor:pointer">
         <b>${esc(o.name)}</b> <span class="muted">${esc(o.team)}</span> — box ${o.boxPts.toFixed(1)} / recon ${o.reconPts.toFixed(1)}
-        · <span class="bad">drift ${o.drift.toFixed(1)}</span>${o.boxOnly ? ` · <span class="warn">${o.boxOnly}</span>` : ''}</summary>
+        · <span class="bad">drift ${o.drift.toFixed(1)}</span>${o.issues.length ? ` · <span class="bad">STRICT FAIL: ${esc(o.issues.join('; '))}</span>` : ' · <span class="ok">strict ok</span>'}${o.boxOnly ? ` · <span class="warn">${o.boxOnly}</span>` : ''}</summary>
       <div style="padding:8px 0 0 16px">
         <table style="max-width:420px"><tr><th>Stat</th><th class="num">Box</th><th class="num">Recon</th><th class="num">Err pts</th></tr>${catLines}</table>
         <div style="max-height:340px;overflow:auto;margin-top:8px"><table>
           <tr><th>Clock</th><th>Branch</th><th>Credited (this player)</th><th>Play text</th></tr>${playRows}</table></div>
       </div></details>`;
-  }).join('') || '<p class="ok">No player with drift ≥ 3 pts in this game.</p>';
+  }).join('') || '<p class="ok">No player fails the strict criterion or drifts ≥ 3 pts in this game.</p>';
   const branchRows = Object.entries(a.deep.branchCounts).sort((x, y) => y[1] - x[1])
     .map(([b, n]) => `<tr><td>${esc(b)}</td><td class="num">${n}</td></tr>`).join('');
   const suspRows = a.deep.suspicious.slice(0, 20).map((t) =>
@@ -378,9 +402,9 @@ function renderGameReport(a) {
   const diagJson = gameDiagJson(a);
   return `
   <div class="verdict ${a.pass ? 'pass' : 'fail'}">${a.pass ? 'PASS' : 'FAIL'} — ${esc(a.evMeta?.name || '')}
-    <small>clocked plays ${d.clockedPct}% (need ≥98) · median player drift ${a.median.toFixed(1)} pts (need ≤1.5) · max drift ${a.max.toFixed(1)} pts · <b>${a.deep.outliers.length} player-line(s) off by ≥3 pts</b>${a.ls ? ` · linescores ${a.ls.allOk ? 'match' : 'MISMATCH'}` : ''}</small>
+    <small><b>strict player-level failures: ${a.deep.strictFails} (need 0)</b> — exact TDs/INTs/receptions/fumbles/kicks, ≤2 pts yardage drift, no phantom credits · clocked plays ${d.clockedPct}% (need ≥98) · median drift ${a.median.toFixed(1)} · max drift ${a.max.toFixed(1)}${a.ls ? ` · linescores ${a.ls.allOk ? 'match' : 'MISMATCH'}` : ''}</small>
   </div>
-  <div class="card"><h2>Error forensics — every player off by ≥ 3 pts (click to expand)</h2>
+  <div class="card"><h2>Error forensics — strict failures and players off by ≥ 3 pts (click to expand)</h2>
     ${outlierRows}
   </div>
   <div class="card"><h2>Parser branch histogram &amp; uncredited plays mentioning known players</h2>
@@ -446,7 +470,8 @@ async function probeWeek() {
   const max = allDrifts.length ? allDrifts[allDrifts.length - 1] : 0;
   const errored = results.filter((r) => r.error);
   const passed = results.filter((r) => !r.error && r.pass);
-  const overall = !errored.length && passed.length === results.length && median <= 1.5;
+  const overall = !errored.length && passed.length === results.length;
+  const totalStrictFails = results.reduce((n, r) => n + (r.error ? 0 : r.deep.strictFails), 0);
   // week-wide forensic aggregation
   const weekOutliers = [];
   const weekCatErr = {};
@@ -464,7 +489,7 @@ async function probeWeek() {
     ? `<tr><td>${esc(r.evMeta.name)}</td><td colspan="5" class="bad">${esc(r.error)}</td></tr>`
     : `<tr><td>${esc(r.evMeta.name)}</td><td class="num">${r.diag.clockedPct}%</td>
        <td class="num">${r.median.toFixed(1)}</td><td class="num">${r.max.toFixed(1)}</td>
-       <td class="num ${r.deep.outliers.length ? 'warn' : 'ok'}">${r.deep.outliers.length}</td>
+       <td class="num ${r.deep.strictFails ? 'bad' : 'ok'}">${r.deep.strictFails}</td>
        <td class="${r.pass ? 'ok' : 'bad'}">${r.pass ? 'PASS' : 'FAIL'}</td></tr>`).join('');
   const catRows = Object.entries(weekCatErr).sort((x, y) => y[1] - x[1])
     .map(([k, v]) => `<tr><td>${k}</td><td class="num ${v > 20 ? 'bad' : v > 5 ? 'warn' : ''}">${v.toFixed(1)}</td></tr>`).join('');
@@ -475,10 +500,11 @@ async function probeWeek() {
      <td style="white-space:normal;font-size:12px">${esc(o.cats.slice(0, 3).map((c) => `${c.k} ${c.box}→${c.recon}`).join(' · '))}</td></tr>`).join('');
   const weekJson = JSON.stringify({
     summary: { games: results.length, passed: passed.length, playerLines: allDrifts.length,
+      strictPlayerFailures: totalStrictFails,
       medianDrift: median, p90Drift: p90, maxDrift: max, outlierLines3plus: weekOutliers.length },
     perGame: results.map((r) => r.error ? { game: r.evMeta.name, error: r.error }
       : { game: r.evMeta.name, clockedPct: r.diag.clockedPct, median: r.median, max: r.max,
-          outliers3: r.deep.outliers.length, linescoresMatch: r.ls ? r.ls.allOk : null, pass: r.pass }),
+          strictFails: r.deep.strictFails, linescoresMatch: r.ls ? r.ls.allOk : null, pass: r.pass }),
     errorPtsByCategory: weekCatErr,
     branchCounts: weekBranches,
     outliers: weekOutliers.slice(0, 25).map(compactOutlier),
@@ -487,7 +513,7 @@ async function probeWeek() {
   }, null, 1);
   $('report').innerHTML = `
     <div class="verdict ${overall ? 'pass' : 'fail'}">${overall ? 'WEEK PASS' : 'WEEK FAIL'} — ${passed.length}/${results.length} games pass
-      <small>${allDrifts.length} scored player-lines · median drift ${median.toFixed(1)} pts · p90 ${p90.toFixed(1)} pts · max ${max.toFixed(1)} pts · <b>${weekOutliers.length} player-line(s) off by ≥3 pts</b>${errored.length ? ` · ${errored.length} fetch errors` : ''}</small>
+      <small><b>strict player-level failures: ${totalStrictFails} (need 0 across every game)</b> · ${allDrifts.length} scored player-lines · median drift ${median.toFixed(1)} pts · p90 ${p90.toFixed(1)} pts · max ${max.toFixed(1)} pts${errored.length ? ` · ${errored.length} fetch errors` : ''}</small>
     </div>
     <div class="card"><h2>Diagnostic report — entire week (copy &amp; paste back to Claude)</h2>
       <button onclick="navigator.clipboard.writeText(document.getElementById('diag-json').value).then(()=>this.textContent='Copied ✓')">Copy to clipboard</button>
@@ -495,7 +521,7 @@ async function probeWeek() {
     </div>
     <div class="card"><h2>Per-game results (click a game above for its full forensic report)</h2>
       <div class="scroll"><table>
-        <tr><th>Game</th><th class="num">Clocked</th><th class="num">Median drift</th><th class="num">Max drift</th><th class="num">Lines ≥3 off</th><th>Verdict</th></tr>
+        <tr><th>Game</th><th class="num">Clocked</th><th class="num">Median drift</th><th class="num">Max drift</th><th class="num">Strict fails</th><th>Verdict</th></tr>
         ${rows}</table></div>
     </div>
     <div class="card"><h2>Week error points by stat category</h2>
