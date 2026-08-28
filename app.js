@@ -805,6 +805,7 @@ async function syncStats(week, force = false) {
     if (error) console.warn(error);
   }
   await loadStats(week);
+  await maybeSettleSwaps(week); // boundary model: settle pending swap boundaries
 }
 
 async function loadStats(week) {
@@ -1025,19 +1026,116 @@ async function ensureLineup(teamId, week) {
   else if (error && error.code === '23505') await loadLineups(week);
 }
 
+// ---- the normalized game-progress boundary model ----
+// The fantasy week is one continuous game: a lineup slot can never receive
+// more than ONE normalized game's worth of usable playing time, and no
+// replacement receives retroactive points. At the swap the slot has consumed
+// B = the out player's normalized elapsed time (OT or final = 1.0 — fully
+// consumed); the out player keeps only his points at that moment, and the
+// replacement earns only production AFTER HIS OWN game's effective boundary
+// E = max(B, his elapsed at swap).
+
+// Normalized game time consumed (0 pre-kick → 1 end of regulation; OT and
+// final count as 1: the scheduled 60 minutes are the normalizer).
+function gameBoundaryElapsed(ev) {
+  if (!ev) return 0;
+  if (ev.completed) return 1;
+  if (ev.state === 'pre') return 0;
+  if (/^OT|overtime/i.test(ev.detail || '')) return 1;
+  return Math.min(1, Math.max(0, 1 - gameFracRemaining(ev)));
+}
+const swapEffBoundary = (sw) =>
+  Math.max(Number(sw.boundary ?? 0), Number(sw.in_elapsed_at_swap ?? 0));
+const fmtPct = (f) => `${Math.round(f * 100)}%`;
+
+// Points the out player keeps: his raw stat line at the swap, scored under
+// the league's current rules (legacy rows fall back to the frozen points).
+function swapOutPts(sw) {
+  if (sw.out_stats_at_swap != null) {
+    return scoreStatsWith(sw.out_stats_at_swap, String(sw.out_player_id).startsWith('DST-'), leagueScoring(league));
+  }
+  return Number(sw.out_points_at_swap) || 0;
+}
+// The in player's contribution: current points minus his points at the
+// effective boundary. While the boundary is unsettled he contributes ZERO —
+// production from before his boundary can never count retroactively.
+function swapInCredit(sw, week) {
+  if (sw.boundary_status === 'pending') return { credit: 0, pending: true };
+  let atBoundary;
+  if (sw.in_stats_at_boundary != null) {
+    atBoundary = scoreStatsWith(sw.in_stats_at_boundary, String(sw.in_player_id).startsWith('DST-'), leagueScoring(league));
+  } else {
+    atBoundary = Number(sw.in_points_at_swap) || 0; // legacy precision
+  }
+  return { credit: playerPts(sw.in_player_id, week) - atBoundary, pending: false };
+}
+
 // The heart of scoring: a slot's points, honoring a live-coaching swap.
-// out player: only points scored BEFORE the sub count (snapshotted at swap time).
-// in player: only points scored AFTER the sub count (current minus snapshot).
 function slotScore(teamId, week, slot) {
   const swap = swapFor(teamId, week, slot);
   if (swap) {
-    const inNow = playerPts(swap.in_player_id, week);
-    const pts = Number(swap.out_points_at_swap) + (inNow - Number(swap.in_points_at_swap));
-    return { pts: Math.round(pts * 100) / 100, swap, playerId: swap.in_player_id };
+    const { credit, pending } = swapInCredit(swap, week);
+    const pts = swapOutPts(swap) + credit;
+    return { pts: Math.round(pts * 100) / 100, swap, playerId: swap.in_player_id, pending };
   }
   const lr = lineupRow(teamId, week, slot);
   const pid = lr?.nfl_player_id || null;
   return { pts: pid ? playerPts(pid, week) : 0, swap: null, playerId: pid };
+}
+
+// ---- boundary settlement: three precision tiers, settled automatically ----
+// Tier 1 'observed'  — a live sync tick at/after the in player's boundary
+//                      snapshots his real stat line as it crosses.
+// Tier 2 'reconstructed' — once his game is final, exact play-by-play
+//                      reconstruction at E via pbp.js (upgrades tier 1/3).
+// Tier 3 'estimated' — proration by E, only when play-by-play is
+//                      unavailable (and for DST slots).
+function scaleStats(stats, f) {
+  const out = {};
+  for (const [k, v] of Object.entries(stats || {})) {
+    out[k] = typeof v === 'number' ? Math.round(v * f * 100) / 100 : v;
+  }
+  return out;
+}
+async function settleSwap(sw, week) {
+  const E = swapEffBoundary(sw);
+  const p = nflPlayers.get(sw.in_player_id);
+  const ev = p && p.team ? teamEvent(p.team, week) : null;
+  if (!ev) return;
+  let patch = null;
+  if (ev.completed) {
+    const isDst = String(sw.in_player_id).startsWith('DST-');
+    if (!isDst && window.PBP) {
+      try {
+        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${ev.id}`);
+        if (res.ok) {
+          const summary = await res.json();
+          const stats = PBP.reconstructAt(summary, E)[sw.in_player_id] || PBP.zero();
+          patch = { in_stats_at_boundary: stats, boundary_status: 'reconstructed' };
+        }
+      } catch (err) { console.warn('boundary reconstruction failed', err); }
+    }
+    if (!patch) {
+      const finalStats = statRow(sw.in_player_id, week)?.stats || {};
+      patch = { in_stats_at_boundary: scaleStats(finalStats, E), boundary_status: 'estimated' };
+    }
+  } else if (ev.state === 'in' && gameBoundaryElapsed(ev) >= E && sw.boundary_status === 'pending') {
+    patch = { in_stats_at_boundary: statRow(sw.in_player_id, week)?.stats || {}, boundary_status: 'observed' };
+  }
+  if (!patch) return;
+  const upgrade = sw.boundary_status === 'pending'
+    || (patch.boundary_status === 'reconstructed' && ['observed', 'estimated'].includes(sw.boundary_status));
+  if (!upgrade) return;
+  const { data, error } = await sb.from('ff_swaps').update(patch)
+    .eq('id', sw.id).in('boundary_status', ['pending', 'observed', 'estimated']).select();
+  if (!error && data && data.length) Object.assign(sw, data[0]);
+}
+async function maybeSettleSwaps(week) {
+  if (!league) return;
+  for (const sw of swapsAll.filter((s) => s.week === week)) {
+    if (['reconstructed', 'legacy'].includes(sw.boundary_status)) continue;
+    await settleSwap(sw, week);
+  }
 }
 
 const teamWeekScore = (teamId, week) =>
@@ -1205,7 +1303,13 @@ function renderSlotRow(teamId, slot) {
   if (swap) {
     const outP = nflPlayers.get(swap.out_player_id);
     const inP = nflPlayers.get(swap.in_player_id);
-    const inEarned = playerPts(swap.in_player_id, week) - Number(swap.in_points_at_swap);
+    const { credit, pending } = swapInCredit(swap, week);
+    const E = swapEffBoundary(swap);
+    const statusNote = pending
+      ? `⏳ <b>${esc(inP?.name || '?')}</b> counts only after his own game's <b>${fmtPct(E)}</b> mark — waiting for his game to reach it`
+      : `<b>${esc(inP?.name || '?')}</b> in — <b>${credit >= 0 ? '+' : ''}${fmtPts(credit)}</b> past his ${fmtPct(E)} boundary${
+          swap.boundary_status === 'estimated' ? ' <i title="play-by-play unavailable — prorated">(estimated)</i>'
+          : swap.boundary_status === 'observed' ? ' <i title="observed live; refined from play-by-play when his game ends">(live)</i>' : ''}`;
     return `<div class="slot-row swapped">
         <span class="slot-tag">${slotLabel(slot, league)}</span>
         <img class="headshot" src="${esc(inP?.headshot || '')}" alt="" onerror="this.style.visibility='hidden'"/>
@@ -1215,9 +1319,9 @@ function renderSlotRow(teamId, slot) {
         </div>
         <div class="p-pts">${fmtPts(pts)}</div>
       </div>
-      <div class="swap-detail">🎧 <b>Live sub</b> at ${new Date(swap.swapped_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}${swap.game_clock ? ` (${esc(swap.game_clock)})` : ''}:
-        <b>${esc(outP?.name || '?')}</b> out, locked at <b>${fmtPts(Number(swap.out_points_at_swap))}</b> pts ·
-        <b>${esc(inP?.name || '?')}</b> in from <b>${fmtPts(Number(swap.in_points_at_swap))}</b> pts (<b>+${fmtPts(inEarned)}</b> since the sub)</div>`;
+      <div class="swap-detail">🎧 <b>Live sub</b> at ${new Date(swap.swapped_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}${swap.game_clock ? ` (${esc(swap.game_clock)})` : ''} — slot boundary <b>${fmtPct(Number(swap.boundary ?? 0))}</b>:
+        <b>${esc(outP?.name || '?')}</b> out, locked at <b>${fmtPts(swapOutPts(swap))}</b> pts ·
+        ${statusNote}</div>`;
   }
 
   if (!basePid) {
@@ -1337,20 +1441,25 @@ function openLiveSub(slot, recommendedPid = null) {
       (b.id === recommendedPid ? 1 : 0) - (a.id === recommendedPid ? 1 : 0));
   }
   const outPts = playerPts(outP.id, week);
+  const B = gameBoundaryElapsed(ev);
   openModal(`
     <div class="modal-head"><h3>🎧 Live Coaching — sub out ${slotLabel(slot, league)}</h3>
       <button class="modal-close" onclick="closeModal()">✕</button></div>
     <div class="subnote with-coach"><svg class="coach-mid"><use href="#coach"/></svg>
-      <span>Just like a real coach: <b>${esc(outP.name)}</b> keeps only the <b>${fmtPts(outPts)} pts</b> he's scored so far (${esc(ev.detail)}).
-      Your sub scores for you <b>from this moment on</b> — anything he's already scored stays on the bench.
+      <span>The week is one continuous game, and this slot has used <b>${fmtPct(B)}</b> of its clock (${esc(ev.detail)}).
+      <b>${esc(outP.name)}</b> keeps only the <b>${fmtPts(outPts)} pts</b> he's scored so far.
+      Your sub earns points only for the <b>${fmtPct(1 - B)}</b> of a game this slot has left — measured on <i>his own</i> game clock, never retroactively.
       <b>One live sub per position per week — no undo.</b></span></div>
     <div class="pick-list">
       ${candidates.map((p) => {
         const pev = teamEvent(p.team, week);
         const now = playerPts(p.id, week);
+        const pElapsed = gameBoundaryElapsed(pev);
         const liveNote = pev.state === 'in'
-          ? `already playing — his current ${fmtPts(now)} pts won't count, only points from now on`
-          : `hasn't kicked off — you'll get everything he scores`;
+          ? (pElapsed >= B
+            ? `already playing — his ${fmtPts(now)} pts so far won't count, only points from now on`
+            : `his game is behind this slot's clock — he counts only after his own ${fmtPct(B)} mark`)
+          : `hasn't kicked off — he counts from his game's ${fmtPct(B)} mark on (${fmtPct(1 - B)} of a game)`;
         const isRec = p.id === recommendedPid;
         return `<div class="slot-row ${isRec ? 'coach-pick' : ''}" onclick="confirmLiveSub('${slot}','${p.id}')">
           <img class="headshot" src="${esc(p.headshot || '')}" alt="" onerror="this.style.visibility='hidden'"/>
@@ -1377,12 +1486,25 @@ async function confirmLiveSub(slot, inPid) {
   if (!inEv || inEv.completed) return toast(`${inP.name} has already played — pick someone who hasn't.`, true);
   const outSnap = playerPts(outP.id, week);
   const inSnap = playerPts(inPid, week);
-  if (!confirm(`🎧 LIVE SUB — ${slotLabel(slot, league)}\n\nOUT: ${outP.name} — locked at ${fmtPts(outSnap)} pts (${ev.detail})\nIN: ${inP.name} — scores from ${fmtPts(inSnap)} pts onward\n\nOne sub per position per week. This cannot be undone. Make the call, coach?`)) return;
+  // Boundary model: the slot has consumed B of its one normalized game.
+  // The replacement's production counts only after HIS OWN game's
+  // E = max(B, his elapsed now) — never retroactively.
+  const B = gameBoundaryElapsed(ev);
+  const inElapsed = gameBoundaryElapsed(inEv);
+  const settledNow = inElapsed >= B; // at/ahead of the boundary: his current line IS the boundary line
+  const inLine2 = settledNow
+    ? `scores from this moment on (${fmtPts(inSnap)} pts so far don't count)`
+    : `scores only AFTER his own game's ${fmtPct(B)} mark — nothing retroactive`;
+  if (!confirm(`🎧 LIVE SUB — ${slotLabel(slot, league)}\n\nThis slot has used ${fmtPct(B)} of its game clock.\n\nOUT: ${outP.name} — locked at ${fmtPts(outSnap)} pts (${ev.detail})\nIN: ${inP.name} — ${inLine2}\n\nOne sub per position per week. This cannot be undone. Make the call, coach?`)) return;
   const { data, error } = await sb.from('ff_swaps').insert({
     league_id: league.id, team_id: mine.id, week, slot,
     out_player_id: outP.id, in_player_id: inPid,
     out_points_at_swap: outSnap, in_points_at_swap: inSnap,
     game_clock: ev.detail,
+    boundary: B, in_elapsed_at_swap: inElapsed,
+    out_stats_at_swap: statRow(outP.id, week)?.stats || {},
+    in_stats_at_boundary: settledNow ? (statRow(inPid, week)?.stats || {}) : null,
+    boundary_status: settledNow ? 'observed' : 'pending',
   }).select().single();
   if (error) {
     if (error.code === '23505') return toast('You already used your live sub for this position this week!', true);
@@ -1391,7 +1513,7 @@ async function confirmLiveSub(slot, inPid) {
   swapsAll.push(data);
   closeModal();
   renderTab();
-  toast(`🎧 ${inP.name} is IN for ${outP.name}! Points split at ${fmtPts(outSnap)}.`);
+  toast(`🎧 ${inP.name} is IN for ${outP.name}! Slot boundary set at ${fmtPct(B)}.`);
 }
 
 // ---------- MATCHUP tab ----------
@@ -2629,11 +2751,19 @@ function buildSituation(week) {
     }
     let best = null;
     for (const a of alts) {
-      const rem = expRemaining(a, week);
+      const aev = teamEvent(a.team, week);
+      // Boundary model: a live sub's usable time is what BOTH clocks allow —
+      // the slot's remaining fraction AND the candidate's own. He earns
+      // nothing from before max(slot elapsed, his elapsed), so his usable
+      // expectation is baseline × min(slot frac, his frac). Pre-lock slots
+      // (plain lineup changes) carry no boundary.
+      const rem = ss.state === 'in'
+        ? baselinePts(a) * Math.min(ss.frac, gameFracRemaining(aev))
+        : expRemaining(a, week);
       if (!best || rem > best.expRem) {
-        const aev = teamEvent(a.team, week);
         best = {
           p: a, expRem: rem, pts: playerPts(a.id, week),
+          elapsed: gameBoundaryElapsed(aev),
           state: !aev ? 'bye' : aev.completed ? 'post' : aev.state === 'in' ? 'in' : 'pre',
           minsToKick: aev && aev.state === 'pre' ? Math.max(0, Math.round((new Date(aev.date) - Date.now()) / 60000)) : null,
         };
@@ -2684,6 +2814,8 @@ function detectSignals(sit) {
           type: 'SUB', slot: ss.slot, out: ss.p, inn: ss.best.p,
           gain: Math.round(ss.gain * 10) / 10, outPts: ss.playerPts,
           inPts: ss.best.pts, minsToKick: ss.best.minsToKick,
+          outElapsed: Math.round(elapsed * 100) / 100,
+          inElapsed: Math.round((ss.best.elapsed || 0) * 100) / 100,
           expSoFar: Math.round(expSoFar * 10) / 10, confidence,
           dedupe: `live:SUB:${ss.slot}:${ss.p.id}:${ss.best.p.id}`,
         });
@@ -2809,10 +2941,14 @@ function speakRec(sig) {
   const pack = PHRASES[coach.key] || PHRASES.grit;
   const ctx = { ...sig, slotLabel: sig.slot ? slotLabel(sig.slot, league) : '' };
   if (sig.inn) {
+    // Boundary model: the sub earns nothing before the slot's consumed-time
+    // mark on his own clock — the pitch must never promise "everything he
+    // scores".
+    const bpct = sig.outElapsed != null ? fmtPct(Math.max(sig.outElapsed, sig.inElapsed || 0)) : null;
     ctx.inLine = sig.minsToKick != null
-      ? `${sig.inn.name} kicks off in ${sig.minsToKick >= 60 ? Math.round(sig.minsToKick / 60) + 'h' : sig.minsToKick + ' minutes'} and projects ${fmtPts(sig.gain || 0)} more from here.`
+      ? `${sig.inn.name} kicks off in ${sig.minsToKick >= 60 ? Math.round(sig.minsToKick / 60) + 'h' : sig.minsToKick + ' minutes'}${bpct ? ` — from his own ${bpct} mark on, he projects ${fmtPts(sig.gain || 0)} for this slot` : ` and projects ${fmtPts(sig.gain || 0)} more from here`}.`
       : sig.type === 'SUB'
-        ? `${sig.inn.name} is live right now and projects ${fmtPts(sig.gain || 0)} more the rest of the way.`
+        ? `${sig.inn.name} is live and projects ${fmtPts(sig.gain || 0)} in the game time your slot has left${bpct ? ` (his production before the ${bpct} boundary can't count)` : ''}.`
         : '';
   }
   if (sig.issue) ctx.issueText = { empty: 'empty', bye: 'on a bye week', fa: 'held by a free agent with no team' }[sig.issue];
@@ -2847,6 +2983,7 @@ async function runCoachEngine(context) {
           margin: sit.margin, band: sit.band, myPts: sit.myPts, oppPts: sit.oppPts,
           outPts: sig.outPts ?? null, inPts: sig.inPts ?? null,
           outPid: sig.out ? sig.out.id : null, inPid: sig.inn ? sig.inn.id : null,
+          outElapsed: sig.outElapsed ?? null, inElapsed: sig.inElapsed ?? null,
           expSoFar: sig.expSoFar ?? null, minsToKick: sig.minsToKick ?? null,
           deficit: sig.deficit ?? null, remaining: sig.remaining ?? null,
           sigBand: sig.band ?? null, lead: sig.lead ?? null, issue: sig.issue ?? null,
@@ -2990,16 +3127,28 @@ async function maybeScoreRecs() {
       if (r.rec_type === 'SUB' && r.out_player_id && r.in_player_id) {
         const sw = swapsAll.find((x) => x.team_id === r.team_id && x.week === w && x.slot === r.slot
           && x.in_player_id === r.in_player_id);
-        const outSnap = sw ? Number(sw.out_points_at_swap) : Number(snap.outPts ?? 0);
-        const inSnap = sw ? Number(sw.in_points_at_swap) : Number(snap.inPts ?? 0);
-        const followed = outSnap + playerPts(r.in_player_id, w) - inSnap;
+        let followed;
+        if (sw) {
+          // the sub actually happened — score it exactly as the slot scored
+          const { credit, pending } = swapInCredit(sw, w);
+          if (pending) continue; // boundary unsettled — score on a later pass
+          followed = swapOutPts(sw) + credit;
+        } else {
+          // counterfactual: had you subbed at the rec, the slot's effective
+          // boundary would have been E = max(out elapsed, in elapsed); the
+          // in player's pre-boundary share is prorated out (estimate)
+          const E = Math.max(Number(snap.outElapsed ?? 0), Number(snap.inElapsed ?? 0));
+          const inTotal = playerPts(r.in_player_id, w);
+          followed = Number(snap.outPts ?? 0) + inTotal * (1 - E);
+        }
         const ignored = playerPts(r.out_player_id, w);
         out = followed - ignored;
       } else if (r.rec_type === 'HOLD') {
         out = 0; // HOLD counterfactuals need the alt snapshot; conservative 0 unless present
         if (snap.inPid && snap.outPid) {
+          const E = Math.max(Number(snap.outElapsed ?? 0), Number(snap.inElapsed ?? 0));
           const followed = playerPts(snap.outPid, w);
-          const ignored = Number(snap.outPts ?? 0) + playerPts(snap.inPid, w) - Number(snap.inPts ?? 0);
+          const ignored = Number(snap.outPts ?? 0) + playerPts(snap.inPid, w) * (1 - E);
           out = followed - ignored;
         }
       }

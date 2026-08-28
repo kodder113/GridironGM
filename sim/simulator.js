@@ -130,6 +130,9 @@ function makeWorld(o = {}) {
     id: 'sw1', league_id: 'L1', team_id: 't1', week: 1, slot: opt.starterPos + '1',
     out_player_id: 'ST', in_player_id: opt.benchState !== 'none' ? 'BN1' : 'MYWR',
     out_points_at_swap: opt.starterPts, in_points_at_swap: 0,
+    boundary: 0.5, in_elapsed_at_swap: 0.5,
+    out_stats_at_swap: mkStats(opt.starterPts), in_stats_at_boundary: mkStats(0),
+    boundary_status: 'observed',
     swapped_at: new Date().toISOString(),
   }] : [];
 
@@ -159,12 +162,18 @@ async function simRunBoth(opts) {
 
 // ---- predefined edge cases with expected verdicts per coach ----
 const SCENARIOS = [
-  { key: 'classic-sub', name: 'Underperforming RB, bench kicks off soon',
-    opts: {}, expect: { grit: ['SUB'], analyst: ['SUB'] } },
-  { key: 'bench-live-sub', name: 'Underperformer, bench option already LIVE',
-    opts: { benchState: 'in', benchPts: 8 }, expect: { grit: ['SUB'], analyst: ['SUB'] } },
-  { key: 'marginal-divergence', name: 'Marginal gain — Grit acts, Analyst holds',
-    opts: { benchPosRank: 55, oppBanked: 13, oppSecond: 0 }, expect: { grit: ['SUB'], analyst: ['HOLD'] } },
+  // Boundary model: a sub only earns the slot's REMAINING normalized time on
+  // his own clock, so viable subs happen earlier and need a real talent gap.
+  { key: 'classic-sub', name: 'Underperforming RB (mid-Q2), elite bench kicks off soon',
+    opts: { quarter: 2, clock: '2:00', benchPosRank: 4 }, expect: { grit: ['SUB'], analyst: ['SUB'] } },
+  { key: 'bench-live-sub', name: 'Underperformer, elite bench option already LIVE',
+    opts: { quarter: 2, clock: '2:00', benchPosRank: 4, benchState: 'in', benchPts: 8 },
+    expect: { grit: ['SUB'], analyst: ['SUB'] } },
+  { key: 'marginal-divergence', name: 'Marginal boundary-priced gain — Grit acts, Analyst holds',
+    opts: { quarter: 3, clock: '6:00', benchPosRank: 4, oppBanked: 13, oppSecond: 0 },
+    expect: { grit: ['SUB'], analyst: ['HOLD'] } },
+  { key: 'late-sub-worthless', name: 'Q3 fade, fresh bench — boundary makes the sub worthless',
+    opts: {}, expect: { grit: ['HOLD'], analyst: ['HOLD'] } },
   { key: 'bench-final', name: 'Bench already played (final) — sub illegal',
     opts: { benchState: 'post' }, expect: { grit: ['HOLD'], analyst: ['HOLD'] } },
   { key: 'no-bench', name: 'No replacement on the bench',
@@ -192,6 +201,15 @@ const SCENARIOS = [
     expect: { grit: ['START'], analyst: ['START'] } },
 ];
 
+// A win probability must never leak as a number — only bands. Game-CLOCK
+// percentages ("from his own 47% mark", "% boundary", "% of its game
+// clock") are legitimate boundary-model language, not probabilities.
+function probLeak(msg) {
+  const scrubbed = String(msg || '')
+    .replace(/\d+%\s*(mark|boundary|of (a|its|his|the)\b)/g, '');
+  return /%|\b0\.\d{2,}\b/.test(scrubbed);
+}
+
 // ---- invariants: run against every scenario result ----
 function checkInvariants(name, coachKey, res, asserts) {
   const A = (label, ok, detail) =>
@@ -206,10 +224,10 @@ function checkInvariants(name, coachKey, res, asserts) {
       A('sub-in game is not final', ev && !ev.completed, r.in_player_id);
       A('slot has no spent live sub', !swapsAll.some((s) => s.team_id === 't1' && s.week === 1 && s.slot === r.slot));
     }
-    A('message has no % or raw probability', r.message && !/%|\b0\.\d{2,}\b/.test(r.message), r.message);
+    A('message has no raw win-probability', r.message && !probLeak(r.message), r.message);
     A('message is non-empty', !!r.message);
   }
-  A('calm line has no % or raw probability', !/%|\b0\.\d{2,}\b/.test(res.calm), res.calm);
+  A('calm line has no raw win-probability', !probLeak(res.calm), res.calm);
   const bandStrings = ['Strong Favorite', 'Favored', 'Toss-Up', 'Underdog', 'Long Shot'];
   if (res.sit.band) A('band is a named band, not a number', bandStrings.includes(res.sit.band), res.sit.band);
 }
@@ -244,7 +262,7 @@ async function simRunAssertions() {
     asserts.push({ scen: sc.name, coach: 'grit', label: 'dedupe: second pass adds nothing', ok: n1 === n2, detail: `${n1} → ${n2}` });
   }
   // accepting a SUB routes into the real modal and writes NOTHING to ff_swaps
-  makeWorld({}); teams[0].coach = 'grit';
+  makeWorld({ quarter: 2, clock: '2:00', benchPosRank: 4 }); teams[0].coach = 'grit';
   await runCoachEngine('sim');
   const rec = (window.__simTables.ff_coach_recs || []).find((r) => r.rec_type === 'SUB');
   if (rec) {
@@ -263,6 +281,70 @@ async function simRunAssertions() {
       ok: rec.decision === 'accepted', detail: rec.decision });
   } else {
     asserts.push({ scen: 'accept flow', coach: 'grit', label: 'SUB rec exists to accept', ok: false });
+  }
+
+  // ---- boundary-model invariants (exercise the PRODUCTION slotScore):
+  // a lineup slot can never receive more than one normalized game's worth of
+  // usable playing time, and no replacement receives retroactive points ----
+  {
+    const BA = (label, ok, detail) =>
+      asserts.push({ scen: 'boundary model', coach: 'engine', label, ok: !!ok, detail: detail || '' });
+    makeWorld({ benchState: 'in', benchPts: 8 });
+    const B = gameBoundaryElapsed(teamEvent('DET', 1)); // focus starter's game
+    BA('boundary is the starter\'s normalized elapsed (0<B<1 mid-game)', B > 0 && B < 1, `B=${B.toFixed(3)}`);
+    const mkSwap = (over) => ({
+      id: 'swB', league_id: 'L1', team_id: 't1', week: 1, slot: 'RB1',
+      out_player_id: 'ST', in_player_id: 'BN1',
+      out_points_at_swap: 1.2, in_points_at_swap: 8,
+      out_stats_at_swap: mkStats(1.2), in_stats_at_boundary: mkStats(8),
+      boundary: B, in_elapsed_at_swap: B, boundary_status: 'observed',
+      swapped_at: new Date().toISOString(), ...over,
+    });
+    // 1) no retroactive points: everything the sub scored before the boundary is excluded
+    swapsAll = [mkSwap()];
+    const s1 = slotScore('t1', 1, 'RB1');
+    BA('no retroactive points: sub\'s 8 pre-boundary pts excluded', Math.abs(s1.pts - 1.2) < 0.01, `slot=${s1.pts}`);
+    // 2) post-boundary production counts in full
+    const bn = statsByWeek[1].get('BN1');
+    bn.stats = mkStats(12); bn.points = 12;
+    const s2 = slotScore('t1', 1, 'RB1');
+    BA('post-boundary production counts (+4)', Math.abs(s2.pts - 5.2) < 0.01, `slot=${s2.pts}`);
+    // 3) pending boundary contributes ZERO until settled
+    swapsAll = [mkSwap({ boundary_status: 'pending', in_stats_at_boundary: null })];
+    const s3 = slotScore('t1', 1, 'RB1');
+    BA('pending boundary: sub contributes zero', Math.abs(s3.pts - 1.2) < 0.01 && s3.pending === true, `slot=${s3.pts}`);
+    // 4) effective boundary honors the SUB's own clock when he is ahead
+    swapsAll = [mkSwap({ in_elapsed_at_swap: Math.min(1, B + 0.2) })];
+    BA('effective boundary = max(B, sub elapsed)', Math.abs(swapEffBoundary(swapsAll[0]) - Math.min(1, B + 0.2)) < 1e-9,
+      `E=${swapEffBoundary(swapsAll[0]).toFixed(3)}`);
+    // 5) one normalized game per slot: consumed + usable never exceeds 1
+    for (const inEl of [0, B, Math.min(1, B + 0.3), 1]) {
+      const E = Math.max(B, inEl);
+      BA(`slot time cap holds (sub elapsed ${inEl.toFixed(2)})`, B + (1 - E) <= 1 + 1e-9, `${B.toFixed(2)} + ${(1 - E).toFixed(2)}`);
+    }
+    // 6) OT or final consumes the slot completely
+    BA('swap during OT consumes the slot at 100%',
+      gameBoundaryElapsed({ state: 'in', completed: false, detail: 'OT 5:00' }) === 1, '');
+    BA('final game consumes the slot at 100%',
+      gameBoundaryElapsed({ state: 'post', completed: true, detail: 'Final' }) === 1, '');
+    // 7) the Coach Engine prices a live sub by usable time on BOTH clocks
+    makeWorld({ benchState: 'in', benchPts: 0 });
+    const sit = buildSituation(1);
+    const rb = sit.slots.find((s) => s.slot === 'RB1');
+    if (rb && rb.best) {
+      const benchFrac = gameFracRemaining(teamEvent('MIN', 1)); // bench lives on g5
+      const expected = baselinePts(nflPlayers.get('BN1')) * Math.min(rb.frac, benchFrac);
+      BA('SUB gain uses min(slot remaining, sub remaining)', Math.abs(rb.best.expRem - expected) < 0.01,
+        `expRem=${rb.best.expRem.toFixed(2)} vs ${expected.toFixed(2)}`);
+    } else {
+      BA('SUB gain uses min(slot remaining, sub remaining)', false, 'no live alt found');
+    }
+    // 8) accepted-and-executed subs are scored with the same boundary math the
+    // slot uses (never the old "everything he scores" formula)
+    makeWorld({ swapUsed: true, benchState: 'in', benchPts: 8 });
+    const spent = slotScore('t1', 1, 'RB1');
+    BA('spent-slot score = out-at-swap + post-boundary only',
+      Math.abs(spent.pts - (1.2 + 8)) < 0.01, `slot=${spent.pts} (out 1.2 + in 8 past his boundary line 0)`);
   }
   return asserts;
 }
