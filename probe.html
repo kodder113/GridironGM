@@ -84,10 +84,19 @@ function fantasyPts(st) {
     + (st.fgMade || 0) * 3 + (st.fgBonus || 0) + (st.xpMade || 0)) * 100) / 100;
 }
 
-async function fetchJson(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`HTTP ${r.status} on ${url}`);
-  return r.json();
+// ESPN throttles bursts (a full-season sweep is ~290 requests): retry with
+// backoff instead of failing the week.
+async function fetchJson(url, tries = 4) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url);
+      if (r.ok) return r.json();
+      lastErr = new Error(`HTTP ${r.status} on ${url}`);
+    } catch (err) { lastErr = err; }
+    await new Promise((res) => setTimeout(res, 1000 * Math.pow(2.5, i)));
+  }
+  throw lastErr;
 }
 
 async function loadWeek() {
@@ -467,6 +476,7 @@ async function probeRange() {
   const failedOutliers = [];
   let totalLines = 0, totalStrict = 0, totalGames = 0, totalPassed = 0;
   for (let w = w1; w <= w2; w++) {
+    if (w > w1) await new Promise((r) => setTimeout(r, 2500)); // breathe between weeks
     let sb2;
     $('status').textContent = `Week ${w}: loading scoreboard…`;
     try { sb2 = await fetchJson(`${API}/scoreboard?dates=${y}&seasontype=2&week=${w}`); }
@@ -485,7 +495,7 @@ async function probeRange() {
         const summary = await fetchJson(`${API}/summary?event=${finals[i].id}`);
         rows.push(analyzeGame(summary, finals[i]));
       } catch (err) { rows.push({ error: err.message, evMeta: finals[i] }); }
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 600));
     }
     const good = rows.filter((r) => !r.error);
     totalGames += rows.length;
