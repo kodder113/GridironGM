@@ -10,10 +10,39 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- The Coach — Gridiron GM is LIVE coaching, so the coach is the face of the app -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="coach" viewBox="0 0 128 128">
+      <!-- polo -->
+      <path d="M20 122 C22 92 40 82 64 82 C88 82 106 92 108 122 Z" fill="#16a34a"/>
+      <path d="M55 83 L64 96 L73 83 L64 87 Z" fill="#0b3d20"/>
+      <!-- whistle lanyard -->
+      <path d="M56 87 L64 105 L72 87" fill="none" stroke="#fbbf24" stroke-width="2.5"/>
+      <circle cx="64" cy="108" r="5" fill="#fbbf24"/>
+      <circle cx="64" cy="108" r="1.8" fill="#1a1509"/>
+      <!-- neck & head -->
+      <rect x="56" y="64" width="16" height="18" rx="7" fill="#d9a066"/>
+      <circle cx="64" cy="48" r="22" fill="#e8b98a"/>
+      <path d="M55 57 Q64 63 73 57" fill="none" stroke="#8a5a34" stroke-width="2.5" stroke-linecap="round"/>
+      <circle cx="55" cy="46" r="2.4" fill="#3b2a1a"/>
+      <circle cx="73" cy="46" r="2.4" fill="#3b2a1a"/>
+      <!-- cap -->
+      <path d="M42 42 C42 24 50 16 64 16 C78 16 86 24 86 42 Z" fill="#1b2233"/>
+      <rect x="37" y="40" width="54" height="7" rx="3.5" fill="#111726"/>
+      <circle cx="64" cy="30" r="5" fill="#22c55e"/>
+      <!-- headset over the cap: band, ear cups, mic -->
+      <path d="M38 48 C36 20 92 20 90 48" fill="none" stroke="#a78bfa" stroke-width="5" stroke-linecap="round"/>
+      <rect x="32" y="42" width="12" height="17" rx="5.5" fill="#a78bfa"/>
+      <rect x="84" y="42" width="12" height="17" rx="5.5" fill="#a78bfa"/>
+      <path d="M38 58 C40 69 50 73 58 71" fill="none" stroke="#a78bfa" stroke-width="4" stroke-linecap="round"/>
+      <circle cx="60" cy="71" r="4.5" fill="#c4b5fd"/>
+    </symbol>
+  </svg>
+
   <!-- ======== AUTH ======== -->
   <div id="auth-screen" class="screen">
     <div class="auth-card">
-      <div class="auth-logo">🎧🏈</div>
+      <div class="auth-logo"><svg class="coach-hero"><use href="#coach"/></svg></div>
       <h1 class="auth-title">Gridiron GM</h1>
       <p class="auth-sub">Fantasy football with <b>Live Coaching</b> — sub your players mid-game, just like a real coach.</p>
 
@@ -59,7 +88,7 @@
   <!-- ======== LEAGUE HUB ======== -->
   <div id="hub-screen" class="screen hidden">
     <header class="topbar">
-      <div class="brand">🎧🏈 <span>Gridiron GM</span></div>
+      <div class="brand"><svg class="coach-mini"><use href="#coach"/></svg> <span>Gridiron GM</span></div>
       <div class="user-box">
         <span id="hub-user-chip" class="user-chip"></span>
         <button class="btn-ghost" onclick="logout()">Sign out</button>
@@ -87,6 +116,20 @@
               <option value="6" selected>6 teams — top 2 seeds get a bye (weeks 15–17)</option>
               <option value="4">4 teams — semis &amp; championship (weeks 16–17)</option>
             </select>
+            <label>Roster Construction <span class="hint">(spots per team — 0 means the position isn't used)</span></label>
+            <div class="roster-grid" id="cl-roster"></div>
+            <p class="rc-summary" id="cl-roster-summary"></p>
+            <label>Scoring</label>
+            <select id="cl-scoring-preset" onchange="applyScoringPreset()">
+              <option value="ppr" selected>Standard — full PPR (1 pt per reception)</option>
+              <option value="half">Half PPR (0.5 per reception)</option>
+              <option value="std">Standard — non-PPR</option>
+              <option value="custom">Custom — set every point value yourself</option>
+            </select>
+            <details class="scoring-editor" id="cl-scoring-editor">
+              <summary>⚙️ Edit point values (per action, per yard, or per whole chunk of yards)</summary>
+              <div id="cl-scoring-grid"></div>
+            </details>
             <label>Draft Date &amp; Time</label>
             <input type="datetime-local" id="cl-draft" required />
             <label>Your Team Name</label>
@@ -114,7 +157,7 @@
   <!-- ======== LEAGUE ======== -->
   <div id="league-screen" class="screen hidden">
     <header class="topbar">
-      <div class="brand clickable" onclick="backToHub()">‹ 🎧🏈 <span id="league-title">League</span></div>
+      <div class="brand clickable" onclick="backToHub()">‹ <svg class="coach-mini"><use href="#coach"/></svg> <span id="league-title">League</span></div>
       <nav class="nav" id="league-nav">
         <button id="nav-team" class="nav-btn" onclick="showTab('team')">My Team</button>
         <button id="nav-matchup" class="nav-btn" onclick="showTab('matchup')">Matchup</button>

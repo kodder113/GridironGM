@@ -6,12 +6,27 @@ const SEASON = 2026;
 const LAST_SEASON = SEASON - 1;
 const NFL_WEEKS = 18;
 const FANTASY_WEEKS = NFL_WEEKS - 1; // nobody plays their starters in Week 18
-const ROSTER_SIZE = 15;
-const SLOTS = ['QB', 'RB1', 'RB2', 'WR1', 'WR2', 'TE', 'FLEX', 'K', 'DST'];
-const SLOT_POS = {
-  QB: ['QB'], RB1: ['RB'], RB2: ['RB'], WR1: ['WR'], WR2: ['WR'],
-  TE: ['TE'], FLEX: ['RB', 'WR', 'TE'], K: ['K'], DST: ['DST'],
-};
+// ---- commissioner-configurable roster construction ----
+const STARTER_POS = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST'];
+const DEFAULT_ROSTER = { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, K: 1, DST: 1, BN: 6 };
+const leagueRoster = (l) => ({ ...DEFAULT_ROSTER, ...((l && l.roster) || {}) });
+function leagueSlots(l) {
+  const r = leagueRoster(l);
+  const out = [];
+  for (const pos of STARTER_POS) {
+    for (let i = 1; i <= (Number(r[pos]) || 0); i++) out.push(pos + i);
+  }
+  return out;
+}
+const slotPosOf = (slot) => slot.replace(/\d+$/, '');
+const slotEligible = (slot) => slotPosOf(slot) === 'FLEX' ? ['RB', 'WR', 'TE'] : [slotPosOf(slot)];
+// "RB2" stays "RB2", but a position with a single starter shows as just "QB"
+function slotLabel(slot, l) {
+  const pos = slotPosOf(slot);
+  return (Number(leagueRoster(l)[pos]) || 0) > 1 ? slot : pos;
+}
+const starterCount = (l) => STARTER_POS.reduce((s, p) => s + (Number(leagueRoster(l)[p]) || 0), 0);
+const rosterSize = (l) => starterCount(l) + (Number(leagueRoster(l).BN) || 0);
 const POS_ORDER = { QB: 0, RB: 1, WR: 2, TE: 3, K: 4, DST: 5 };
 const STATS_SYNC_MS = 60 * 1000;
 
@@ -57,15 +72,51 @@ const teamFull = (abbr) => TEAMS[abbr] ? `${TEAMS[abbr].city} ${TEAMS[abbr].name
 const teamLogo = (abbr) => TEAMS[abbr]
   ? `https://a.espncdn.com/i/teamlogos/nfl/500/${TEAMS[abbr].espn}.png` : '';
 
-// PPR scoring — the standard fantasy rules that already exist.
-const SCORING = {
-  passYd: 0.04, passTD: 4, passInt: -2,
-  rushYd: 0.1, rushTD: 6,
-  rec: 1, recYd: 0.1, recTD: 6,
+// ---- commissioner-configurable scoring ----
+// Counting stats are flat points per action. Yardage stats are {pts, per, whole}:
+//   whole=false → every yard counts fractionally (1 pt per 10 yds: 7 yds = 0.7)
+//   whole=true  → only COMPLETED chunks score (10 pts per 10 yds: 7 yds = 0)
+const DEFAULT_SCORING = {
+  passYds: { pts: 1, per: 25, whole: false }, passTD: 4, passInt: -2,
+  rushYds: { pts: 1, per: 10, whole: false }, rushTD: 6,
+  rec: 1, recYds: { pts: 1, per: 10, whole: false }, recTD: 6,
   fumLost: -2,
-  xp: 1, fg: 3, // +1 for 40–49, +2 for 50+
+  xp: 1, fg: 3, fg40: 1, fg50: 2,
   dstSack: 1, dstInt: 2, dstFumRec: 2, dstTD: 6, dstSafety: 2,
 };
+const SCORING_DEFS = [
+  { key: 'passYds', label: 'Passing yards', yardage: true },
+  { key: 'passTD', label: 'Passing TD' },
+  { key: 'passInt', label: 'Interception thrown' },
+  { key: 'rushYds', label: 'Rushing yards', yardage: true },
+  { key: 'rushTD', label: 'Rushing TD' },
+  { key: 'rec', label: 'Reception' },
+  { key: 'recYds', label: 'Receiving yards', yardage: true },
+  { key: 'recTD', label: 'Receiving TD' },
+  { key: 'fumLost', label: 'Fumble lost' },
+  { key: 'fg', label: 'Field goal made' },
+  { key: 'fg40', label: 'FG 40–49 yd bonus' },
+  { key: 'fg50', label: 'FG 50+ yd bonus' },
+  { key: 'xp', label: 'Extra point' },
+  { key: 'dstSack', label: 'D/ST sack' },
+  { key: 'dstInt', label: 'D/ST interception' },
+  { key: 'dstFumRec', label: 'D/ST fumble recovery' },
+  { key: 'dstTD', label: 'D/ST / return TD' },
+  { key: 'dstSafety', label: 'D/ST safety' },
+];
+const SCORING_PRESETS = {
+  ppr: { label: 'Standard — full PPR', patch: { rec: 1 } },
+  half: { label: 'Half PPR', patch: { rec: 0.5 } },
+  std: { label: 'Standard — non-PPR', patch: { rec: 0 } },
+};
+const leagueScoring = (l) => ({ ...DEFAULT_SCORING, ...((l && l.scoring) || {}) });
+function yardPts(yds, rule) {
+  if (rule == null) return 0;
+  if (typeof rule === 'number') return yds * rule;
+  const pts = Number(rule.pts) || 0;
+  const per = Number(rule.per) || 1;
+  return rule.whole ? Math.trunc(yds / per) * pts : yds * (pts / per);
+}
 function dstPaPoints(pa) {
   if (pa === 0) return 10;
   if (pa <= 6) return 7;
@@ -115,8 +166,6 @@ async function fetchAll(build) {
 }
 
 // ---------- init ----------
-init();
-
 async function init() {
   populateTeamSelect();
   populateCreateLeagueSelects();
@@ -156,6 +205,112 @@ function populateCreateLeagueSelects() {
     sel.appendChild(o);
   });
   updateDivisionOptions();
+  buildRosterEditor();
+  buildScoringEditor();
+}
+
+// ---- create-league: roster construction editor ----
+const ROSTER_EDIT = [
+  { pos: 'QB', label: 'QB', max: 3 }, { pos: 'RB', label: 'RB', max: 5 },
+  { pos: 'WR', label: 'WR', max: 5 }, { pos: 'TE', label: 'TE', max: 3 },
+  { pos: 'FLEX', label: 'FLEX', max: 3 }, { pos: 'K', label: 'K', max: 2 },
+  { pos: 'DST', label: 'DEF', max: 2 }, { pos: 'BN', label: 'Bench', max: 10 },
+];
+function buildRosterEditor() {
+  $('cl-roster').innerHTML = ROSTER_EDIT.map(({ pos, label, max }) => `
+    <div class="rc-item"><span class="rc-label ${pos === 'BN' ? '' : 'pos-' + pos}">${label}</span>
+      <select id="cl-r-${pos}" onchange="updateRosterSummary()">
+        ${Array.from({ length: max + 1 }, (_, i) => `<option value="${i}" ${i === DEFAULT_ROSTER[pos] ? 'selected' : ''}>${i}</option>`).join('')}
+      </select></div>`).join('');
+  updateRosterSummary();
+}
+function collectRosterForm() {
+  const r = {};
+  ROSTER_EDIT.forEach(({ pos }) => { r[pos] = parseInt($(`cl-r-${pos}`).value, 10) || 0; });
+  return r;
+}
+function updateRosterSummary() {
+  const r = collectRosterForm();
+  const starters = STARTER_POS.reduce((s, p) => s + r[p], 0);
+  $('cl-roster-summary').textContent =
+    `${starters} starters + ${r.BN} bench = ${starters + r.BN} roster spots → a ${starters + r.BN}-round draft`;
+}
+
+// ---- create-league: scoring editor ----
+function buildScoringEditor() {
+  $('cl-scoring-grid').innerHTML = SCORING_DEFS.map((d) => {
+    const v = DEFAULT_SCORING[d.key];
+    if (d.yardage) {
+      return `<div class="sc-row yardage">
+        <span class="sc-label">${d.label}</span>
+        <span class="sc-inputs">
+          <input type="number" step="any" id="sc-${d.key}-pts" value="${v.pts}" onchange="markCustomScoring()"/> pts per
+          <input type="number" step="1" min="1" id="sc-${d.key}-per" value="${v.per}" onchange="markCustomScoring()"/> yds
+          <select id="sc-${d.key}-mode" onchange="markCustomScoring()">
+            <option value="frac" selected>every yard counts (fractional)</option>
+            <option value="whole">whole chunks only — leftovers score 0</option>
+          </select></span></div>`;
+    }
+    return `<div class="sc-row">
+      <span class="sc-label">${d.label}</span>
+      <span class="sc-inputs"><input type="number" step="any" id="sc-${d.key}" value="${v}" onchange="markCustomScoring()"/> pts</span></div>`;
+  }).join('') + `<p class="form-note">"Whole chunks only" is strict: at 10 pts per 10 yds, 7 yards is 0 points and 27 yards is 20 — only completed chunks count.
+    D/ST points-allowed uses the standard tiers (0 pts allowed = 10 … 35+ = −4).</p>`;
+}
+function markCustomScoring() { $('cl-scoring-preset').value = 'custom'; }
+function applyScoringPreset() {
+  const key = $('cl-scoring-preset').value;
+  const preset = SCORING_PRESETS[key];
+  if (!preset) { $('cl-scoring-editor').open = true; return; }
+  const sc = { ...DEFAULT_SCORING, ...preset.patch };
+  SCORING_DEFS.forEach((d) => {
+    const v = sc[d.key];
+    if (d.yardage) {
+      $(`sc-${d.key}-pts`).value = v.pts;
+      $(`sc-${d.key}-per`).value = v.per;
+      $(`sc-${d.key}-mode`).value = v.whole ? 'whole' : 'frac';
+    } else {
+      $(`sc-${d.key}`).value = v;
+    }
+  });
+  // re-select the preset (the inputs' onchange flipped it to custom)
+  $('cl-scoring-preset').value = key;
+}
+function collectScoringForm() {
+  const sc = {};
+  SCORING_DEFS.forEach((d) => {
+    if (d.yardage) {
+      sc[d.key] = {
+        pts: parseFloat($(`sc-${d.key}-pts`).value) || 0,
+        per: Math.max(1, parseInt($(`sc-${d.key}-per`).value, 10) || 1),
+        whole: $(`sc-${d.key}-mode`).value === 'whole',
+      };
+    } else {
+      sc[d.key] = parseFloat($(`sc-${d.key}`).value) || 0;
+    }
+  });
+  return sc;
+}
+
+// League rules summary shown in Draft Central / Draft Recap
+function leagueRulesHtml(l) {
+  const r = leagueRoster(l);
+  const sc = leagueScoring(l);
+  const rosterLine = ROSTER_EDIT.filter(({ pos }) => r[pos] > 0)
+    .map(({ pos, label }) => `${r[pos]} ${label}`).join(' · ');
+  const fmtRule = (d) => {
+    const v = sc[d.key];
+    if (d.yardage) {
+      const w = v && v.whole;
+      return `${v.pts} pt${Math.abs(v.pts) === 1 ? '' : 's'} per ${v.per} yds${w ? ' (whole chunks only)' : ''}`;
+    }
+    return `${v} pt${Math.abs(v) === 1 ? '' : 's'}`;
+  };
+  return `<details class="rules-details"><summary>⚙️ League rules — roster &amp; scoring</summary>
+    <p class="panel-sub" style="margin-top:8px"><b>Rosters:</b> ${rosterLine} (${rosterSize(l)} players, ${starterCount(l)} start)</p>
+    <div class="rules-grid">${SCORING_DEFS.map((d) => `<div class="rules-row"><span>${d.label}</span><span>${fmtRule(d)}</span></div>`).join('')}</div>
+    <p class="form-note">D/ST points allowed: 0 → 10 · 1–6 → 7 · 7–13 → 4 · 14–20 → 1 · 21–27 → 0 · 28–34 → −1 · 35+ → −4</p>
+  </details>`;
 }
 
 function updateDivisionOptions() {
@@ -289,9 +444,14 @@ async function handleCreateLeague(e) {
   const draftLocal = $('cl-draft').value;
   const teamName = $('cl-teamname').value.trim();
   if (!name || !teamName || !draftLocal) return;
+  const roster = collectRosterForm();
+  if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
+    return toast('Your roster needs at least one starting spot!', true);
+  const scoring = collectScoringForm();
   const { data: lg, error } = await sb.from('ff_leagues').insert({
     name, commissioner_id: me.id, season: SEASON,
     num_teams, num_divisions, playoff_teams,
+    roster, scoring,
     invite_code: randomCode(),
     draft_at: new Date(draftLocal).toISOString(),
   }).select().single();
@@ -628,29 +788,38 @@ function parseSummary(summary, ev, week) {
   return [...rows.values()];
 }
 
-function scoreStats(st, isDst) {
+function scoreStatsWith(st, isDst, sc) {
+  const n = (v) => Number(v) || 0;
   if (isDst) {
     return Math.round((
-      (st.sacks || 0) * SCORING.dstSack + (st.ints || 0) * SCORING.dstInt
-      + (st.fumRec || 0) * SCORING.dstFumRec + (st.tds || 0) * SCORING.dstTD
-      + (st.safeties || 0) * SCORING.dstSafety
+      (st.sacks || 0) * n(sc.dstSack) + (st.ints || 0) * n(sc.dstInt)
+      + (st.fumRec || 0) * n(sc.dstFumRec) + (st.tds || 0) * n(sc.dstTD)
+      + (st.safeties || 0) * n(sc.dstSafety)
       + dstPaPoints(st.pointsAllowed ?? 0)) * 100) / 100;
   }
+  // fgBonus stat is stored in "standard bonus units" (1 per 40–49, 2 per 50+);
+  // custom leagues rescale it: units of 40-49s ≈ fg40 pts, 50+ pairs ≈ fg50.
+  const fgBonusPts = (st.fgBonus || 0) === 0 ? 0
+    : (st.fgBonus || 0) * ((n(sc.fg40) + n(sc.fg50)) / 3 || 0);
   return Math.round((
-    (st.passYds || 0) * SCORING.passYd + (st.passTD || 0) * SCORING.passTD
-    + (st.passInt || 0) * SCORING.passInt
-    + (st.rushYds || 0) * SCORING.rushYd + (st.rushTD || 0) * SCORING.rushTD
-    + (st.rec || 0) * SCORING.rec + (st.recYds || 0) * SCORING.recYd
-    + (st.recTD || 0) * SCORING.recTD
-    + (st.fumLost || 0) * SCORING.fumLost
-    + (st.fgMade || 0) * SCORING.fg + (st.fgBonus || 0)
-    + (st.xpMade || 0) * SCORING.xp) * 100) / 100;
+    yardPts(st.passYds || 0, sc.passYds) + (st.passTD || 0) * n(sc.passTD)
+    + (st.passInt || 0) * n(sc.passInt)
+    + yardPts(st.rushYds || 0, sc.rushYds) + (st.rushTD || 0) * n(sc.rushTD)
+    + (st.rec || 0) * n(sc.rec) + yardPts(st.recYds || 0, sc.recYds)
+    + (st.recTD || 0) * n(sc.recTD)
+    + (st.fumLost || 0) * n(sc.fumLost)
+    + (st.fgMade || 0) * n(sc.fg) + fgBonusPts
+    + (st.xpMade || 0) * n(sc.xp)) * 100) / 100;
 }
+// The shared stats cache always stores standard-scoring points; every league
+// re-scores the raw stat line with its own rules.
+const scoreStats = (st, isDst) => scoreStatsWith(st, isDst, DEFAULT_SCORING);
 
 const statRow = (pid, week) => (statsByWeek[week] || new Map()).get(pid);
 const playerPts = (pid, week) => {
   const r = statRow(pid, week);
-  return r ? Number(r.points) : 0;
+  if (!r) return 0;
+  return scoreStatsWith(r.stats || {}, String(pid).startsWith('DST-'), leagueScoring(league));
 };
 
 function statLine(pid, week) {
@@ -704,19 +873,20 @@ async function ensureLineup(teamId, week) {
   }
   const used = new Set();
   const assign = {};
-  for (const slot of SLOTS) {
+  const slots = leagueSlots(league);
+  for (const slot of slots) {
     const p = prev.find((l) => l.slot === slot);
     const pl = p && nflPlayers.get(p.nfl_player_id);
-    if (pl && roster.some((r) => r.id === pl.id) && SLOT_POS[slot].includes(pl.position) && !used.has(pl.id)) {
+    if (pl && roster.some((r) => r.id === pl.id) && slotEligible(slot).includes(pl.position) && !used.has(pl.id)) {
       assign[slot] = pl.id; used.add(pl.id);
     }
   }
-  for (const slot of SLOTS) {
+  for (const slot of slots) {
     if (assign[slot]) continue;
-    const pl = roster.find((r) => SLOT_POS[slot].includes(r.position) && !used.has(r.id));
+    const pl = roster.find((r) => slotEligible(slot).includes(r.position) && !used.has(r.id));
     if (pl) { assign[slot] = pl.id; used.add(pl.id); }
   }
-  const inserts = SLOTS.filter((s) => assign[s]).map((s) => ({
+  const inserts = slots.filter((s) => assign[s]).map((s) => ({
     league_id: league.id, team_id: teamId, week, slot: s, nfl_player_id: assign[s],
   }));
   if (!inserts.length) return;
@@ -741,7 +911,7 @@ function slotScore(teamId, week, slot) {
 }
 
 const teamWeekScore = (teamId, week) =>
-  Math.round(SLOTS.reduce((sum, s) => sum + slotScore(teamId, week, s).pts, 0) * 100) / 100;
+  Math.round(leagueSlots(league).reduce((sum, s) => sum + slotScore(teamId, week, s).pts, 0) * 100) / 100;
 
 function playerLocked(pid, week) {
   const p = nflPlayers.get(pid);
@@ -832,7 +1002,7 @@ async function renderTeamTab() {
   const bench = roster.filter((p) => !starters.has(p.id));
   const total = teamWeekScore(mine.id, selectedWeek);
 
-  const slotRows = SLOTS.map((slot) => renderSlotRow(mine.id, slot)).join('');
+  const slotRows = leagueSlots(league).map((slot) => renderSlotRow(mine.id, slot)).join('');
   const benchRows = bench.map((p) => {
     const subbedIn = swapIns.has(p.id);
     return playerRowHtml(p, selectedWeek, {
@@ -849,7 +1019,8 @@ async function renderTeamTab() {
           <h2>🧢 ${esc(mine.name)} — Week ${selectedWeek}</h2>
           <span class="mu-score">${fmtPts(total)}</span>
         </div>
-        <p class="panel-sub">Starters lock at their game's kickoff. Once a game is <span class="live-badge">LIVE</span> you can make <b style="color:var(--purple)">one live sub per position</b> — the 🎧 button.</p>
+        <p class="panel-sub coach-hint"><svg class="coach-mid"><use href="#coach"/></svg>
+          <span>Starters lock at their game's kickoff. Once a game is <span class="live-badge">LIVE</span>, coach it like the sideline: <b style="color:var(--purple)">one live sub per position</b> — the 🎧 button.</span></p>
         ${slotRows}
       </div>
       <div class="panel">
@@ -896,7 +1067,7 @@ function renderSlotRow(teamId, slot) {
     const inP = nflPlayers.get(swap.in_player_id);
     const inEarned = playerPts(swap.in_player_id, week) - Number(swap.in_points_at_swap);
     return `<div class="slot-row swapped">
-        <span class="slot-tag">${slot}</span>
+        <span class="slot-tag">${slotLabel(slot, league)}</span>
         <img class="headshot" src="${esc(inP?.headshot || '')}" alt="" onerror="this.style.visibility='hidden'"/>
         <div class="p-info">
           <div class="p-name" onclick="openProfile('${inP?.id}')">🎧 ${esc(inP?.name || '?')} <span class="pos-badge pos-${inP?.position}">${inP?.position || ''}</span></div>
@@ -911,7 +1082,7 @@ function renderSlotRow(teamId, slot) {
 
   if (!basePid) {
     return `<div class="slot-row empty-slot">
-      <span class="slot-tag">${slot}</span>
+      <span class="slot-tag">${slotLabel(slot, league)}</span>
       <div class="p-info"><div class="p-meta">Empty slot</div></div>
       ${isMine ? `<div class="slot-actions"><button class="btn-small" onclick="openSlotPicker('${slot}')">Set</button></div>` : ''}
     </div>`;
@@ -930,7 +1101,7 @@ function renderSlotRow(teamId, slot) {
     : `<div class="slot-actions"><button class="btn-small" onclick="openSlotPicker('${slot}')">Change</button></div>`;
 
   return `<div class="slot-row ${locked ? 'locked' : ''} ${live ? 'live-game' : ''}">
-    <span class="slot-tag">${slot}</span>
+    <span class="slot-tag">${slotLabel(slot, league)}</span>
     <img class="headshot" src="${esc(p.headshot || '')}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"/>
     <div class="p-info">
       <div class="p-name" onclick="openProfile('${p.id}')">${esc(p.name)} <span class="pos-badge pos-${p.position}">${p.position}</span></div>
@@ -948,14 +1119,14 @@ function openSlotPicker(slot) {
   const inSlots = new Set(lineup.map((l) => l.nfl_player_id));
   const swapPids = new Set(teamSwaps(mine.id, week).flatMap((s) => [s.in_player_id, s.out_player_id]));
   const candidates = rosterOf(mine.id).filter((p) =>
-    SLOT_POS[slot].includes(p.position)
+    slotEligible(slot).includes(p.position)
     && !inSlots.has(p.id)
     && !swapPids.has(p.id)
     && !playerLocked(p.id, week));
   const current = lineupRow(mine.id, week, slot);
   const curP = current && nflPlayers.get(current.nfl_player_id);
   openModal(`
-    <div class="modal-head"><h3>Set ${slot} — Week ${week}</h3>
+    <div class="modal-head"><h3>Set ${slotLabel(slot, league)} — Week ${week}</h3>
       <button class="modal-close" onclick="closeModal()">✕</button></div>
     ${curP ? `<p class="panel-sub">Currently: <b>${esc(curP.name)}</b></p>` : ''}
     <div class="pick-list">
@@ -992,7 +1163,7 @@ async function setSlot(slot, pid) {
   await loadLineups(week);
   closeModal();
   renderTab();
-  toast(pid ? `${slot} set: ${nflPlayers.get(pid)?.name} ✓` : `${slot} emptied`);
+  toast(pid ? `${slotLabel(slot, league)} set: ${nflPlayers.get(pid)?.name} ✓` : `${slotLabel(slot, league)} emptied`);
 }
 
 // ---- LIVE COACHING ----
@@ -1003,7 +1174,7 @@ function liveSubCandidates(slot) {
   const inSlots = new Set(lineup.map((l) => l.nfl_player_id));
   const swapPids = new Set(teamSwaps(mine.id, week).flatMap((s) => [s.in_player_id, s.out_player_id]));
   return rosterOf(mine.id).filter((p) => {
-    if (!SLOT_POS[slot].includes(p.position)) return false;
+    if (!slotEligible(slot).includes(p.position)) return false;
     if (inSlots.has(p.id) || swapPids.has(p.id)) return false;
     const ev = p.team ? teamEvent(p.team, week) : null;
     if (!ev) return false;            // bye week — can't come in
@@ -1023,11 +1194,12 @@ function openLiveSub(slot) {
   const candidates = liveSubCandidates(slot);
   const outPts = playerPts(outP.id, week);
   openModal(`
-    <div class="modal-head"><h3>🎧 Live Coaching — sub out ${slot}</h3>
+    <div class="modal-head"><h3>🎧 Live Coaching — sub out ${slotLabel(slot, league)}</h3>
       <button class="modal-close" onclick="closeModal()">✕</button></div>
-    <div class="subnote">Just like a real coach: <b>${esc(outP.name)}</b> keeps only the <b>${fmtPts(outPts)} pts</b> he's scored so far (${esc(ev.detail)}).
+    <div class="subnote with-coach"><svg class="coach-mid"><use href="#coach"/></svg>
+      <span>Just like a real coach: <b>${esc(outP.name)}</b> keeps only the <b>${fmtPts(outPts)} pts</b> he's scored so far (${esc(ev.detail)}).
       Your sub scores for you <b>from this moment on</b> — anything he's already scored stays on the bench.
-      <b>One live sub per position per week — no undo.</b></div>
+      <b>One live sub per position per week — no undo.</b></span></div>
     <div class="pick-list">
       ${candidates.map((p) => {
         const pev = teamEvent(p.team, week);
@@ -1060,7 +1232,7 @@ async function confirmLiveSub(slot, inPid) {
   if (!inEv || inEv.completed) return toast(`${inP.name} has already played — pick someone who hasn't.`, true);
   const outSnap = playerPts(outP.id, week);
   const inSnap = playerPts(inPid, week);
-  if (!confirm(`🎧 LIVE SUB — ${slot}\n\nOUT: ${outP.name} — locked at ${fmtPts(outSnap)} pts (${ev.detail})\nIN: ${inP.name} — scores from ${fmtPts(inSnap)} pts onward\n\nOne sub per position per week. This cannot be undone. Make the call, coach?`)) return;
+  if (!confirm(`🎧 LIVE SUB — ${slotLabel(slot, league)}\n\nOUT: ${outP.name} — locked at ${fmtPts(outSnap)} pts (${ev.detail})\nIN: ${inP.name} — scores from ${fmtPts(inSnap)} pts onward\n\nOne sub per position per week. This cannot be undone. Make the call, coach?`)) return;
   const { data, error } = await sb.from('ff_swaps').insert({
     league_id: league.id, team_id: mine.id, week, slot,
     out_player_id: outP.id, in_player_id: inPid,
@@ -1131,7 +1303,7 @@ function renderFeaturedMatchup([aId, bId], week) {
   if (bId === mine.id) [aId, bId] = [bId, aId];
   const ta = teams.find((t) => t.id === aId), tb = teams.find((t) => t.id === bId);
   const sa = teamWeekScore(aId, week), sc = teamWeekScore(bId, week);
-  const rows = SLOTS.map((slot) => {
+  const rows = leagueSlots(league).map((slot) => {
     const A = slotScore(aId, week, slot), B = slotScore(bId, week, slot);
     const side = (r, right) => {
       const p = r.playerId && nflPlayers.get(r.playerId);
@@ -1143,7 +1315,7 @@ function renderFeaturedMatchup([aId, bId], week) {
         </div>
         <div class="p-pts">${fmtPts(r.pts)}</div></div>`;
     };
-    return `<div class="mu-row">${side(A, false)}<span class="slot-tag">${slot}</span>${side(B, true)}</div>`;
+    return `<div class="mu-row">${side(A, false)}<span class="slot-tag">${slotLabel(slot, league)}</span>${side(B, true)}</div>`;
   }).join('');
   return `<div class="panel">
     <div class="mu-head">
@@ -1215,14 +1387,14 @@ function renderPlayersTab() {
   }).join('') || '<p class="empty-note">No players match. Try another search.</p>';
   if (canManage) {
     $('players-pool').insertAdjacentHTML('afterbegin',
-      `<p class="table-note">Your roster: ${myCount}/${ROSTER_SIZE}. Adding when full asks you to drop someone.</p>`);
+      `<p class="table-note">Your roster: ${myCount}/${rosterSize(league)}. Adding when full asks you to drop someone.</p>`);
   }
 }
 
 async function addPlayer(pid, dropPid = null) {
   const mine = myTeam();
   const myRoster = rosters.filter((r) => r.team_id === mine.id);
-  if (!dropPid && myRoster.length >= ROSTER_SIZE) {
+  if (!dropPid && myRoster.length >= rosterSize(league)) {
     const droppable = myRoster.map((r) => nflPlayers.get(r.nfl_player_id)).filter(Boolean)
       .filter((p) => canDrop(p.id));
     openModal(`
@@ -1474,19 +1646,19 @@ function startDraftPoll() {
       return;
     }
     // If the last picker's client dropped before finalizing, anyone finishes the job
-    if (draftPicks.length >= teams.length * DRAFT_ROUNDS) { await finalizeDraft(); return; }
+    if (draftPicks.length >= teams.length * draftRounds()) { await finalizeDraft(); return; }
     if (draftPicks.length !== before) renderDraftTab();
   }, 3000);
 }
 
 const draftOrder = () => [...teams].sort((a, b) => (a.draft_pos || 99) - (b.draft_pos || 99));
-const DRAFT_ROUNDS = ROSTER_SIZE;
+const draftRounds = () => rosterSize(league);
 
 function onClockTeam() {
   const order = draftOrder();
   const n = order.length;
   const overall = draftPicks.length + 1;
-  if (overall > n * DRAFT_ROUNDS) return null;
+  if (overall > n * draftRounds()) return null;
   const round = Math.floor((overall - 1) / n);
   const idx = (overall - 1) % n;
   return order[round % 2 === 0 ? idx : n - 1 - idx];
@@ -1510,6 +1682,7 @@ function renderDraftTab() {
       </div>
       <p><b>Draft:</b> ${draftDate ? draftDate.toLocaleString(undefined, { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'not scheduled'}
         ${isCommish() ? `<button class="btn-ghost" style="margin-left:8px" onclick="changeDraftDate()">Change</button>` : ''}</p>
+      ${leagueRulesHtml(league)}
       <h3 style="margin-top:16px">Teams (${teams.length}/${league.num_teams})</h3>
       <table><thead><tr><th>Team</th><th>Owner</th></tr></thead><tbody>
         ${teams.map((t) => `<tr class="${t.owner_id === me.id ? 'me' : ''}">
@@ -1519,7 +1692,7 @@ function renderDraftTab() {
       ${isCommish() ? `
         <button class="btn-primary" ${full ? '' : 'disabled'} onclick="startDraft()">
           🚀 Start the Draft ${full ? '' : `(need ${league.num_teams - teams.length} more team${league.num_teams - teams.length > 1 ? 's' : ''})`}</button>
-        <p class="form-note">Starting the draft randomizes the snake order and assigns divisions. ${DRAFT_ROUNDS} rounds — 9 starters + ${DRAFT_ROUNDS - 9} bench.</p>`
+        <p class="form-note">Starting the draft randomizes the snake order and assigns divisions. ${draftRounds()} rounds — ${starterCount(league)} starters + ${Number(leagueRoster(league).BN) || 0} bench.</p>`
         : `<p class="form-note">Waiting on the commissioner to start the draft${full ? '' : ' once the league fills up'}.</p>`}
     </div>`;
     return;
@@ -1533,7 +1706,7 @@ function renderDraftTab() {
     const round = Math.floor((overall - 1) / order.length) + 1;
     el.innerHTML = `
       <div class="on-clock ${myTurn ? 'my-turn' : ''}">
-        <div><div class="oc-label">Round ${round} · Pick ${overall} of ${order.length * DRAFT_ROUNDS}</div>
+        <div><div class="oc-label">Round ${round} · Pick ${overall} of ${order.length * draftRounds()}</div>
           <div class="oc-team">${myTurn ? '🎉 YOU\'RE ON THE CLOCK!' : `On the clock: ${esc(clock?.name || '…')} (${esc(ownerName(clock))})`}</div></div>
         <div class="oc-label">Snake order: ${order.map((t) => esc(t.name.split(' ')[0])).join(' → ')}</div>
       </div>
@@ -1569,6 +1742,7 @@ function renderDraftTab() {
   el.innerHTML = `<div class="panel">
     <h2>📋 Draft Recap</h2>
     <div class="invite-box"><span>Invite code:</span><span class="invite-code">${league.invite_code}</span></div>
+    ${leagueRulesHtml(league)}
     ${draftPicks.length ? `<table><thead><tr><th>Pick</th><th>Player</th><th>Pos</th><th>Team</th></tr></thead>
       <tbody>${draftPicks.map((pk) => {
         const p = nflPlayers.get(pk.nfl_player_id);
@@ -1659,7 +1833,7 @@ async function draftPlayer(pid) {
   }
   draftPicks.push(data);
   toast(`Pick ${overall}: ${nflPlayers.get(pid)?.name} ✓`);
-  if (draftPicks.length >= teams.length * DRAFT_ROUNDS) await finalizeDraft();
+  if (draftPicks.length >= teams.length * draftRounds()) await finalizeDraft();
   renderDraftTab();
 }
 
@@ -1722,7 +1896,7 @@ async function openProfile(pid) {
   ]);
   const cur = statRow(pid, selectedWeek);
   $('profile-body').innerHTML = `
-    ${cur ? `<h3>Week ${selectedWeek} — ${fmtPts(Number(cur.points))} fantasy pts</h3>
+    ${cur ? `<h3>Week ${selectedWeek} — ${fmtPts(playerPts(pid, selectedWeek))} fantasy pts</h3>
       <p class="panel-sub">${esc(statLine(pid, selectedWeek)) || 'No stats yet'} ${cur.game_status === 'in_progress' ? '<span class="live-badge">● LIVE</span>' : ''}</p>` : ''}
     <h3>${SEASON} Weekly Stats</h3>
     ${renderGamelogTable(thisYear) || '<p class="empty-note">No games yet this season.</p>'}
@@ -1743,7 +1917,7 @@ function renderDstProfile(p) {
     <tbody>${rows.map(({ w, r }) => `<tr><td>${w}</td><td>${esc(r.opponent || '')}</td>
       <td class="num">${r.stats.sacks || 0}</td><td class="num">${r.stats.ints || 0}</td>
       <td class="num">${r.stats.fumRec || 0}</td><td class="num">${r.stats.tds || 0}</td>
-      <td class="num">${r.stats.pointsAllowed ?? '—'}</td><td class="num"><b>${fmtPts(Number(r.points))}</b></td></tr>`).join('')}
+      <td class="num">${r.stats.pointsAllowed ?? '—'}</td><td class="num"><b>${fmtPts(scoreStatsWith(r.stats || {}, true, leagueScoring(league)))}</b></td></tr>`).join('')}
     </tbody></table></div>`;
 }
 
@@ -1800,3 +1974,5 @@ function toast(msg, isError = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), 3000);
 }
+
+init();

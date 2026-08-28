@@ -305,6 +305,43 @@ tr.me td { background: rgba(34,197,94,.07); }
 }
 .subnote b { color: var(--purple); }
 
+/* ===== The Coach ===== */
+.coach-hero { width: 84px; height: 84px; display: block; margin: 0 auto; filter: drop-shadow(0 6px 18px rgba(167,139,250,.35)); }
+.coach-mini { width: 26px; height: 26px; vertical-align: -6px; }
+.coach-mid { width: 46px; height: 46px; flex-shrink: 0; }
+.subnote.with-coach { display: flex; gap: 12px; align-items: center; }
+.coach-hint { display: flex; gap: 10px; align-items: center; }
+
+/* ===== Create-league: roster construction ===== */
+.roster-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+}
+@media (max-width: 480px) { .roster-grid { grid-template-columns: repeat(2, 1fr); } }
+.rc-item { display: flex; flex-direction: column; gap: 4px; align-items: center; }
+.rc-label { font-size: 11.5px; font-weight: 700; color: var(--muted); }
+.rc-item select { width: 100%; padding: 8px 6px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); text-align: center; font-weight: 700; }
+.rc-summary { font-size: 12.5px; color: var(--accent); font-weight: 600; margin-top: 6px; }
+
+/* ===== Create-league: scoring editor ===== */
+.scoring-editor { background: var(--bg-2); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; margin-top: 6px; }
+.scoring-editor summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.scoring-editor summary:hover { color: var(--text); }
+.sc-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+.sc-label { color: var(--text); font-weight: 600; }
+.sc-inputs { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; flex-wrap: wrap; }
+.sc-inputs input { width: 64px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); text-align: center; font-weight: 700; }
+.sc-inputs select { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 12px; }
+
+/* ===== League rules summary ===== */
+.rules-details { background: var(--bg-2); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 14px; margin: 12px 0; }
+.rules-details summary { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--muted); }
+.rules-details summary:hover { color: var(--text); }
+.rules-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; margin-top: 6px; }
+@media (max-width: 640px) { .rules-grid { grid-template-columns: 1fr; } }
+.rules-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.rules-row span:last-child { color: var(--muted); text-align: right; }
+
 /* ===== Toast ===== */
 .toast {
   position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);

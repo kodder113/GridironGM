@@ -19,6 +19,12 @@ Scoring math for a subbed slot: `out_points_at_swap + (in_player_final − in_po
 
 - **Sign up** with name, username, email, age group, and favorite team. Sign back in with just your email.
 - **Create a league**: pick an even number of teams (4–16), optional divisions (e.g. 12 teams → 2×6, 3×4, or 4×3), 4- or 6-team playoffs, and a draft date. You get an invite code + shareable link (`?join=CODE`) to send your friends.
+- **Roster construction is the commissioner's call**: how many QB, RB, WR, TE (if any), FLEX (if any), K, DEF, and bench spots — from 0 of a position up to 5. The draft automatically becomes as many rounds as the roster has spots, and every lineup, matchup, and live-sub screen follows the league's slots.
+- **Scoring is the commissioner's call too**: apply a preset (full PPR, half PPR, non-PPR) or set every point value — TDs, INTs, receptions, fumbles, kicking, D/ST. Yardage rules support two modes:
+  - *every yard counts* — fractional, e.g. 1 pt per 25 yds means 113 yds = 4.52
+  - *whole chunks only* — strict, e.g. **10 pts per 10 yds means 7 yards = 0** (the chunk wasn't completed; 27 yards = 20)
+
+  Raw stat lines are shared league-to-league, but every league re-scores them with its own rules — including the live-coaching point snapshots.
 - **Season length**: the NFL plays 18 weeks, but the fantasy season is **17 — always total weeks minus one** — because nobody plays their starters in Week 18.
   - 6-team playoffs: regular season weeks 1–14, quarterfinals W15 (top 2 seeds bye), semis W16, championship W17.
   - 4-team playoffs: regular season weeks 1–15, semis W16, championship W17.
@@ -27,7 +33,7 @@ Scoring math for a subbed slot: `out_points_at_swap + (in_player_final − in_po
 - **Rosters/lineups**: QB, 2 RB, 2 WR, TE, FLEX (RB/WR/TE), K, D/ST + 6 bench. Weekly head-to-head matchups on a round-robin schedule; standings, playoff bracket, and a league champion.
 - **Free agency**: add/drop any unowned player (with a drop prompt when your roster is full).
 - **Player profiles**: click any player for headshot, last season's full weekly stats, and this season's week-by-week log (from ESPN).
-- **Scoring** (standard PPR): pass yds 1/25 · pass TD 4 · INT −2 · rush/rec yds 1/10 · rush/rec TD 6 · reception 1 · fumble lost −2 · FG 3 (+1 at 40–49, +2 at 50+) · XP 1 · D/ST: sack 1, INT 2, fumble rec 2, TD 6, safety 2, points-allowed tiers 10/7/4/1/0/−1/−4.
+- **Default scoring** (standard PPR, editable per league): pass yds 1/25 · pass TD 4 · INT −2 · rush/rec yds 1/10 · rush/rec TD 6 · reception 1 · fumble lost −2 · FG 3 (+1 at 40–49, +2 at 50+) · XP 1 · D/ST: sack 1, INT 2, fumble rec 2, TD 6, safety 2, points-allowed tiers 10/7/4/1/0/−1/−4.
 
 ## Live stats
 
