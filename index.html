@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gridiron GM — Fantasy Football with Live Coaching</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎧</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ======== AUTH ======== -->
+  <div id="auth-screen" class="screen">
+    <div class="auth-card">
+      <div class="auth-logo">🎧🏈</div>
+      <h1 class="auth-title">Gridiron GM</h1>
+      <p class="auth-sub">Fantasy football with <b>Live Coaching</b> — sub your players mid-game, just like a real coach.</p>
+
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" onclick="showAuthTab('login')">Sign In</button>
+        <button id="tab-signup" class="auth-tab" onclick="showAuthTab('signup')">Sign Up</button>
+      </div>
+
+      <form id="login-form" class="auth-form" onsubmit="handleLogin(event)">
+        <label>Email</label>
+        <input type="email" id="login-email" placeholder="you@example.com" required />
+        <button type="submit" class="btn-primary">Sign In</button>
+      </form>
+
+      <form id="signup-form" class="auth-form hidden" onsubmit="handleSignup(event)">
+        <label>Name</label>
+        <input type="text" id="signup-name" placeholder="Your name" required maxlength="40" />
+        <label>Username</label>
+        <input type="text" id="signup-username" placeholder="e.g. gridiron_guru" required maxlength="24" pattern="[A-Za-z0-9_]{3,24}" title="3–24 letters, numbers or underscores" />
+        <label>Email</label>
+        <input type="email" id="signup-email" placeholder="you@example.com" required />
+        <label>Age Group</label>
+        <select id="signup-age" required>
+          <option value="" disabled selected>Select your age group</option>
+          <option>Under 18</option>
+          <option>18–24</option>
+          <option>25–34</option>
+          <option>35–44</option>
+          <option>45–54</option>
+          <option>55–64</option>
+          <option>65+</option>
+        </select>
+        <label>Favorite Football Team</label>
+        <select id="signup-team" required>
+          <option value="" disabled selected>Select your team</option>
+        </select>
+        <button type="submit" class="btn-primary">Create Account</button>
+      </form>
+      <p id="auth-error" class="auth-error hidden"></p>
+    </div>
+  </div>
+
+  <!-- ======== LEAGUE HUB ======== -->
+  <div id="hub-screen" class="screen hidden">
+    <header class="topbar">
+      <div class="brand">🎧🏈 <span>Gridiron GM</span></div>
+      <div class="user-box">
+        <span id="hub-user-chip" class="user-chip"></span>
+        <button class="btn-ghost" onclick="logout()">Sign out</button>
+      </div>
+    </header>
+    <main class="hub-main">
+      <section class="panel">
+        <h2>🏟️ My Leagues</h2>
+        <p class="panel-sub">Leagues you've created or joined</p>
+        <div id="my-leagues"></div>
+      </section>
+
+      <div class="hub-grid">
+        <section class="panel">
+          <h2>➕ Create a League</h2>
+          <form class="stack-form" onsubmit="handleCreateLeague(event)">
+            <label>League Name</label>
+            <input type="text" id="cl-name" placeholder="e.g. Sunday Legends" required maxlength="40" />
+            <label>Number of Teams <span class="hint">(must be even)</span></label>
+            <select id="cl-teams" onchange="updateDivisionOptions()"></select>
+            <label>Divisions</label>
+            <select id="cl-divisions"></select>
+            <label>Playoff Teams <span class="hint">(division winners + wildcards advance)</span></label>
+            <select id="cl-playoffs">
+              <option value="6" selected>6 teams — top 2 seeds get a bye (weeks 15–17)</option>
+              <option value="4">4 teams — semis &amp; championship (weeks 16–17)</option>
+            </select>
+            <label>Draft Date &amp; Time</label>
+            <input type="datetime-local" id="cl-draft" required />
+            <label>Your Team Name</label>
+            <input type="text" id="cl-teamname" placeholder="e.g. Bench Warmers" required maxlength="30" />
+            <button type="submit" class="btn-primary">Create League</button>
+            <p class="form-note">The fantasy season runs weeks 1–17 — the NFL's 18 weeks minus one, because nobody plays their starters in Week 18.</p>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>📨 Join a League</h2>
+          <form class="stack-form" onsubmit="handleJoinLeague(event)">
+            <label>Invite Code</label>
+            <input type="text" id="jl-code" placeholder="e.g. K7XQ2M" required maxlength="8" style="text-transform:uppercase" />
+            <label>Your Team Name</label>
+            <input type="text" id="jl-teamname" placeholder="e.g. Couch Coaches" required maxlength="30" />
+            <button type="submit" class="btn-primary">Join League</button>
+            <p class="form-note">Ask your commissioner for the invite code or link.</p>
+          </form>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- ======== LEAGUE ======== -->
+  <div id="league-screen" class="screen hidden">
+    <header class="topbar">
+      <div class="brand clickable" onclick="backToHub()">‹ 🎧🏈 <span id="league-title">League</span></div>
+      <nav class="nav" id="league-nav">
+        <button id="nav-team" class="nav-btn" onclick="showTab('team')">My Team</button>
+        <button id="nav-matchup" class="nav-btn" onclick="showTab('matchup')">Matchup</button>
+        <button id="nav-players" class="nav-btn" onclick="showTab('players')">Players</button>
+        <button id="nav-standings" class="nav-btn" onclick="showTab('standings')">Standings</button>
+        <button id="nav-draft" class="nav-btn" onclick="showTab('draft')">Draft</button>
+      </nav>
+      <div class="user-box">
+        <button id="refresh-btn" class="btn-ghost" onclick="manualRefresh()" title="Refresh live stats">⟳</button>
+        <span id="user-chip" class="user-chip"></span>
+        <button class="btn-ghost" onclick="logout()">Sign out</button>
+      </div>
+    </header>
+
+    <div class="week-nav" id="week-nav">
+      <button class="week-arrow" onclick="changeWeek(-1)">‹</button>
+      <div id="week-pills" class="week-pills"></div>
+      <button class="week-arrow" onclick="changeWeek(1)">›</button>
+    </div>
+
+    <main>
+      <section id="tab-team" class="view hidden"><div id="team-view"></div></section>
+      <section id="tab-matchup" class="view hidden"><div id="matchup-view"></div></section>
+      <section id="tab-players" class="view hidden">
+        <div class="panel">
+          <div class="pool-controls">
+            <input type="text" id="pool-search" placeholder="🔍 Search players…" oninput="renderPlayersTab()" />
+            <div id="pos-filters" class="pos-filters"></div>
+          </div>
+          <div id="players-pool"></div>
+        </div>
+      </section>
+      <section id="tab-standings" class="view hidden"><div id="standings-view"></div></section>
+      <section id="tab-draft" class="view hidden"><div id="draft-view"></div></section>
+    </main>
+  </div>
+
+  <!-- ======== MODALS ======== -->
+  <div id="modal-backdrop" class="modal-backdrop hidden" onclick="if(event.target===this)closeModal()">
+    <div id="modal-box" class="modal-box"></div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="vendor/supabase.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
