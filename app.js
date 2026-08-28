@@ -145,7 +145,12 @@ let currentNflWeek = 1;
 let selectedWeek = 1;
 let activeTab = 'team';
 let draftPollTimer = null;
+let draftClockTimer = null;
+let preDraftTimer = null;
 let liveTimer = null;
+let byeWeeks = null;       // NFL team -> bye week (from the season schedule)
+let lastAutoOverall = 0;   // guards double auto-picks when the clock expires
+let preTickCount = 0;
 const statsSyncAt = {};    // week -> last sync ts
 
 const $ = (id) => document.getElementById(id);
@@ -333,6 +338,15 @@ function openLeagueSettings() {
       <option value="4" ${league.playoff_teams === 4 ? 'selected' : ''}>4 teams — semis &amp; championship</option>
       <option value="2" ${league.playoff_teams === 2 ? 'selected' : ''}>2 teams — championship game only</option>
     </select>
+    <label class="ls-label">Draft Order</label>
+    <select id="ls-ordermode">
+      <option value="random" ${league.draft_order_mode !== 'manual' ? 'selected' : ''}>Random snake — revealed at draft start</option>
+      <option value="manual" ${league.draft_order_mode === 'manual' ? 'selected' : ''}>Commissioner sets the order</option>
+    </select>
+    <label class="ls-label">Pick Clock</label>
+    <select id="ls-clock">
+      ${[0, 30, 60, 90, 120].map((c) => `<option value="${c}" ${Number(league.draft_clock) === c ? 'selected' : ''}>${c ? c + ' seconds' : 'No limit'}</option>`).join('')}
+    </select>
     <label class="ls-label">Roster Construction</label>
     <div class="roster-grid" id="ls-roster">${rosterEditorHtml('ls', leagueRoster(league))}</div>
     <p class="rc-summary" id="ls-roster-summary"></p>`
@@ -380,7 +394,11 @@ async function saveLeagueSettings() {
     const roster = collectRosterForm('ls');
     if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
       return toast('Your roster needs at least one starting spot!', true);
-    Object.assign(upd, { num_teams, num_divisions, playoff_teams, roster });
+    Object.assign(upd, {
+      num_teams, num_divisions, playoff_teams, roster,
+      draft_order_mode: $('ls-ordermode').value,
+      draft_clock: parseInt($('ls-clock').value, 10) || 0,
+    });
   }
   const { error } = await sb.from('ff_leagues').update(upd).eq('id', league.id);
   if (error) return toast(error.message, true);
@@ -551,6 +569,8 @@ async function handleCreateLeague(e) {
   const { data: lg, error } = await sb.from('ff_leagues').insert({
     name, commissioner_id: me.id, season: SEASON,
     num_teams, num_divisions, playoff_teams,
+    draft_order_mode: $('cl-ordermode').value,
+    draft_clock: parseInt($('cl-clock').value, 10) || 0,
     roster, scoring,
     invite_code: randomCode(),
     draft_at: new Date(draftLocal).toISOString(),
@@ -1023,6 +1043,8 @@ function playerLocked(pid, week) {
 // ---------- tabs / navigation ----------
 function stopTimers() {
   clearInterval(draftPollTimer); draftPollTimer = null;
+  clearInterval(draftClockTimer); draftClockTimer = null;
+  clearInterval(preDraftTimer); preDraftTimer = null;
   clearInterval(liveTimer); liveTimer = null;
 }
 
@@ -1047,8 +1069,14 @@ function showTab(tab) {
   $('nav-draft').innerHTML = league.status === 'drafting' ? 'Draft<span class="dot"></span>' : 'Draft';
   $('week-nav').style.display = (tab === 'draft') ? 'none' : 'flex';
   renderTab();
-  if (league.status === 'drafting' && tab === 'draft') startDraftPoll();
-  else { clearInterval(draftPollTimer); draftPollTimer = null; }
+  clearInterval(draftPollTimer); draftPollTimer = null;
+  clearInterval(draftClockTimer); draftClockTimer = null;
+  clearInterval(preDraftTimer); preDraftTimer = null;
+  if (tab === 'draft') {
+    ensureByeWeeks().then(() => { if (activeTab === 'draft') renderDraftPool(); });
+    if (league.status === 'drafting') { startDraftPoll(); startDraftClock(); }
+    if (league.status === 'pre_draft') startPreDraftPoll();
+  }
 }
 
 function changeWeek(d) { selectWeek(Math.min(FANTASY_WEEKS, Math.max(1, selectedWeek + d))); }
@@ -1463,7 +1491,7 @@ function renderPlayersTab() {
   list.sort((a, b) => {
     const pa = playerPts(a.id, selectedWeek), pb = playerPts(b.id, selectedWeek);
     if (pa !== pb) return pb - pa;
-    return (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || a.name.localeCompare(b.name);
+    return byRank(a, b);
   });
   list = list.slice(0, 150);
   $('players-pool').innerHTML = list.map((p) => {
@@ -1476,7 +1504,8 @@ function renderPlayersTab() {
       else if (isMinePlayer) action = `<button class="btn-small red" onclick="dropPlayer('${p.id}')">Drop</button>`;
     }
     return `<div class="pool-row">
-      <span class="pos-badge pos-${p.position}">${p.position}</span>
+      <span class="rank-chip">${fmtRank(p)}</span>
+      <span class="pos-badge pos-${p.position}">${posRankLabel(p)}</span>
       <img class="headshot" src="${esc(p.headshot || '')}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"/>
       <div class="p-info">
         <div class="p-name" onclick="openProfile('${p.id}')">${esc(p.name)}</div>
@@ -1761,6 +1790,249 @@ function startDraftPoll() {
 const draftOrder = () => [...teams].sort((a, b) => (a.draft_pos || 99) - (b.draft_pos || 99));
 const draftRounds = () => rosterSize(league);
 
+// ---- expert rankings (FantasyPros consensus, seeded into ff_nfl_players) ----
+const playerRank = (p) => (p && p.rank != null) ? Number(p.rank) : 9999;
+const fmtRank = (p) => p.rank != null ? '#' + Math.round(Number(p.rank)) : '·';
+const posRankLabel = (p) => p.pos_rank != null ? p.position + Math.round(Number(p.pos_rank)) : p.position;
+const byRank = (a, b) => playerRank(a) - playerRank(b) || a.name.localeCompare(b.name);
+
+// ---- bye weeks (computed once from the season schedule, cached) ----
+async function ensureByeWeeks() {
+  if (byeWeeks) return;
+  const cached = JSON.parse(localStorage.getItem(`ff_byes_${SEASON}`) || 'null');
+  if (cached) { byeWeeks = cached; return; }
+  try {
+    for (let w = 1; w <= FANTASY_WEEKS; w++) {
+      if (!eventsByWeek[w] || !eventsByWeek[w].length) await fetchWeekEvents(w);
+    }
+    const map = {};
+    let complete = true;
+    for (const abbr of Object.keys(TEAMS)) {
+      let bye = null;
+      for (let w = 1; w <= FANTASY_WEEKS; w++) {
+        const evs = eventsByWeek[w] || [];
+        if (!evs.length) { complete = false; break; }
+        if (!evs.some((e) => e.home === abbr || e.away === abbr)) { bye = w; break; }
+      }
+      map[abbr] = bye;
+    }
+    byeWeeks = map;
+    if (complete) localStorage.setItem(`ff_byes_${SEASON}`, JSON.stringify(map));
+  } catch { byeWeeks = {}; }
+}
+const byeOf = (abbr) => (byeWeeks && byeWeeks[abbr]) || null;
+
+// ---- pick clock ----
+function pickDeadline() {
+  if (!league || !Number(league.draft_clock)) return null;
+  const last = draftPicks[draftPicks.length - 1];
+  const base = last ? new Date(last.created_at).getTime()
+    : (league.draft_started_at ? new Date(league.draft_started_at).getTime() : Date.now());
+  return base + Number(league.draft_clock) * 1000;
+}
+
+function startDraftClock() {
+  clearInterval(draftClockTimer);
+  draftClockTimer = setInterval(async () => {
+    if (!league || league.status !== 'drafting' || activeTab !== 'draft') return;
+    const el = $('pick-clock');
+    const dl = pickDeadline();
+    if (!dl) { if (el) el.textContent = ''; return; }
+    const remain = Math.max(0, Math.ceil((dl - Date.now()) / 1000));
+    if (el) {
+      el.textContent = `⏱ ${Math.floor(remain / 60)}:${String(remain % 60).padStart(2, '0')}`;
+      el.classList.toggle('urgent', remain <= 10);
+    }
+    if (remain > 0) return;
+    const overall = draftPicks.length + 1;
+    const clock = onClockTeam();
+    if (!clock || lastAutoOverall === overall) return;
+    const overBy = (Date.now() - dl) / 1000;
+    const isMine = clock.owner_id === me.id;
+    // the on-the-clock client autopicks itself; the commissioner covers
+    // absent owners after a short grace period
+    if (isMine || (isCommish() && overBy >= 4)) {
+      lastAutoOverall = overall;
+      await autoPickTop(clock, isMine);
+    }
+  }, 500);
+}
+
+// Clock expired: the top-ranked available player is automatically selected
+async function autoPickTop(team, wasMine) {
+  const drafted = new Set(draftPicks.map((p) => p.nfl_player_id));
+  const best = [...nflPlayers.values()]
+    .filter((p) => !drafted.has(p.id) && p.team)
+    .sort(byRank)[0];
+  if (!best) return;
+  const overall = draftPicks.length + 1;
+  const { data, error } = await sb.from('ff_draft_picks').insert({
+    league_id: league.id, overall, team_id: team.id, nfl_player_id: best.id,
+  }).select().single();
+  if (error) return; // someone else's insert won — the poll resolves it
+  draftPicks.push(data);
+  toast(`⏰ Clock expired — ${wasMine ? 'your pick was made for you' : esc(team.name) + ' was auto-picked'}: ${best.name}`);
+  if (draftPicks.length >= teams.length * draftRounds()) { await finalizeDraft(); return; }
+  renderDraftTab();
+}
+
+// ---- pre-draft: countdown + auto-start at the scheduled time ----
+function fmtDur(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+    m = Math.floor((s % 3600) / 60), ss = s % 60;
+  if (d) return `${d}d ${h}h ${m}m`;
+  if (h) return `${h}h ${m}m ${ss}s`;
+  return `${m}m ${ss}s`;
+}
+
+function startPreDraftPoll() {
+  clearInterval(preDraftTimer);
+  preTickCount = 0;
+  preDraftTimer = setInterval(async () => {
+    if (document.hidden || !league || league.status !== 'pre_draft' || activeTab !== 'draft') return;
+    const el = $('draft-countdown');
+    if (el && league.draft_at) {
+      const ms = new Date(league.draft_at) - Date.now();
+      el.textContent = ms > 0 ? `— starts automatically in ${fmtDur(ms)}` :
+        (teams.length >= league.num_teams ? '— starting…' : '— scheduled time reached, waiting for the league to fill');
+    }
+    if (++preTickCount % 5 !== 0) return;
+    const before = `${league.status}:${teams.length}`;
+    const [{ data: lg }, { data: tm }] = await Promise.all([
+      sb.from('ff_leagues').select('*').eq('id', league.id).single(),
+      sb.from('ff_teams').select('*').eq('league_id', league.id).order('created_at'),
+    ]);
+    if (!lg) return;
+    league = lg; teams = tm || [];
+    if (league.status !== 'pre_draft') {
+      await loadLeague(league.id);
+      await loadOwners();
+      showTab('draft');
+      toast('The draft is LIVE! 🚀');
+      return;
+    }
+    // auto-start at the scheduled time once the league is full
+    if (league.draft_at && Date.now() >= new Date(league.draft_at).getTime()
+        && teams.length >= league.num_teams) {
+      await beginDraft(true);
+      return;
+    }
+    // avoid nuking the commissioner's order-editor selection mid-edit
+    if (`${league.status}:${teams.length}` !== before
+        && !(document.activeElement && document.activeElement.id || '').startsWith('do-')) {
+      await loadOwners();
+      renderDraftTab();
+    }
+  }, 1000);
+}
+
+// ---- starting the draft (manual button or scheduled auto-start) ----
+async function beginDraft(auto = false) {
+  // claim the start — exactly one client wins this update
+  const { data: won } = await sb.from('ff_leagues')
+    .update({ status: 'drafting', draft_started_at: new Date().toISOString() })
+    .eq('id', league.id).eq('status', 'pre_draft').select();
+  if (!won || !won.length) { await loadLeague(league.id); showTab('draft'); return; }
+  let ordered;
+  if (league.draft_order_mode === 'manual') {
+    const withPos = teams.filter((t) => t.draft_pos).sort((a, b) => a.draft_pos - b.draft_pos);
+    const withoutPos = teams.filter((t) => !t.draft_pos).sort(() => Math.random() - 0.5);
+    ordered = [...withPos, ...withoutPos];
+  } else {
+    ordered = [...teams].sort(() => Math.random() - 0.5);
+  }
+  for (let i = 0; i < ordered.length; i++) {
+    await sb.from('ff_teams').update({
+      draft_pos: i + 1,
+      division: (i % league.num_divisions) + 1,
+    }).eq('id', ordered[i].id);
+  }
+  await loadLeague(league.id);
+  showTab('draft');
+  toast(auto ? '🕰️ Scheduled draft time — the draft is LIVE! 🚀' : 'The draft is LIVE! 🚀');
+}
+
+// ---- commissioner sets the draft order (manual mode, before the draft) ----
+async function saveDraftOrder() {
+  if (!isCommish() || league.status !== 'pre_draft') return;
+  const picks = teams.map((t) => ({ t, pos: parseInt($(`do-${t.id}`)?.value, 10) || 0 }));
+  const nums = picks.map((x) => x.pos).filter(Boolean);
+  if (new Set(nums).size !== nums.length)
+    return toast('Two teams have the same pick number — every team needs its own spot.', true);
+  for (const { t, pos } of picks) {
+    await sb.from('ff_teams').update({ draft_pos: pos || null }).eq('id', t.id);
+  }
+  await loadLeague(league.id);
+  renderDraftTab();
+  toast('Draft order saved ✓');
+}
+
+// ---- the AI assistant coach: who should I take? ----
+function coachRecommend() {
+  const mine = myTeam();
+  if (!mine) return [];
+  const drafted = new Set(draftPicks.map((p) => p.nfl_player_id));
+  const have = draftPicks.filter((p) => p.team_id === mine.id)
+    .map((p) => nflPlayers.get(p.nfl_player_id)).filter(Boolean);
+  const r = leagueRoster(league);
+  const count = (pos) => have.filter((x) => x.position === pos).length;
+  const need = {};
+  for (const pos of ['QB', 'RB', 'WR', 'TE', 'K', 'DST'])
+    need[pos] = Math.max(0, (Number(r[pos]) || 0) - count(pos));
+  const picksLeft = draftRounds() - have.length;
+  const mustFill = need.K + need.DST;
+  const avail = [...nflPlayers.values()].filter((p) => !drafted.has(p.id) && p.team).sort(byRank);
+  const bestAt = {}, secondAt = {};
+  for (const p of avail) {
+    if (!bestAt[p.position]) bestAt[p.position] = p;
+    else if (!secondAt[p.position]) secondAt[p.position] = p;
+  }
+  return avail.slice(0, 60).map((p) => {
+    let score = 300 - Math.min(playerRank(p), 300);
+    const why = [];
+    if (['K', 'DST'].includes(p.position)) {
+      if (picksLeft <= mustFill + 1 && need[p.position] > 0) {
+        score += 500; why.push(`you still need a ${p.position === 'K' ? 'kicker' : 'defense'} and picks are running out`);
+      } else score -= 500;
+    } else if (need[p.position] > 0) {
+      score += 40; why.push(`fills your open ${p.position} spot`);
+    }
+    if (bestAt[p.position] === p && secondAt[p.position]) {
+      const drop = playerRank(secondAt[p.position]) - playerRank(p);
+      if (drop >= 12 && playerRank(p) < 900) {
+        score += Math.min(drop, 30);
+        why.push(`big drop-off after him — the next ${p.position} is ~${Math.round(drop)} spots later`);
+      }
+    }
+    if (!why.length) why.push('best player available by expert rank');
+    return { p, score, why };
+  }).sort((a, b) => b.score - a.score).slice(0, 3);
+}
+
+function renderCoachCall() {
+  const box = $('coach-call');
+  if (!box) return;
+  const recs = coachRecommend();
+  if (!recs.length) { box.innerHTML = ''; return; }
+  const clock = onClockTeam();
+  const myTurn = clock && clock.owner_id === me.id;
+  const [top, ...alts] = recs;
+  box.innerHTML = `<div class="coach-call">
+    <svg class="coach-mid"><use href="#coach"/></svg>
+    <div class="cc-body">
+      <div class="cc-label">🎧 Coach's Call ${myTurn ? '— you\'re on the clock' : '— for your next pick'}</div>
+      <div class="cc-pick"><b>${esc(top.p.name)}</b>
+        <span class="pos-badge pos-${top.p.position}">${posRankLabel(top.p)}</span>
+        <span class="cc-rank">${fmtRank(top.p)} overall</span></div>
+      <div class="cc-why">${esc(top.why.join(' · '))}</div>
+      ${alts.length ? `<div class="cc-alts">Also considering: ${alts.map((a) =>
+        `<b>${esc(a.p.name)}</b> (${posRankLabel(a.p)})`).join(' · ')}</div>` : ''}
+    </div>
+    <button class="btn-small purple" ${myTurn ? '' : 'disabled'} onclick="draftPlayer('${top.p.id}')">Draft him</button>
+  </div>`;
+}
+
 // ---- CPU teams: fill open spots so a league can be tested (or played) solo ----
 const CPU_TEAM_NAMES = ['Circuit Breakers', 'Robo Rushers', 'Data Dawgs', 'Silicon Stampede',
   'Neural Knights', 'Binary Blitz', 'Auto Audibles', 'Machine Maulers', 'Turing Titans',
@@ -1805,13 +2077,22 @@ function cpuChoosePlayer(teamId) {
     .map((p) => nflPlayers.get(p.nfl_player_id)).filter(Boolean);
   const r = leagueRoster(league);
   const count = (pos) => have.filter((p) => p.position === pos).length;
-  const needs = ['RB', 'WR', 'QB', 'TE', 'K', 'DST'].filter((pos) => count(pos) < (Number(r[pos]) || 0));
-  const pool = [...nflPlayers.values()].filter((p) => !drafted.has(p.id) && p.team);
-  let cands = needs.length
-    ? pool.filter((p) => p.position === needs[0])
-    : pool.filter((p) => ['QB', 'RB', 'WR', 'TE'].includes(p.position));
+  const skillNeeds = ['RB', 'WR', 'QB', 'TE'].filter((pos) => count(pos) < (Number(r[pos]) || 0));
+  const lateNeeds = ['K', 'DST'].filter((pos) => count(pos) < (Number(r[pos]) || 0));
+  const picksLeft = draftRounds() - have.length;
+  const pool = [...nflPlayers.values()].filter((p) => !drafted.has(p.id) && p.team).sort(byRank);
+  let cands;
+  if (lateNeeds.length && picksLeft <= lateNeeds.length + 1) {
+    cands = pool.filter((p) => p.position === lateNeeds[0]);
+  } else if (skillNeeds.length) {
+    cands = pool.filter((p) => p.position === skillNeeds[0]);
+  } else {
+    cands = pool.filter((p) => ['QB', 'RB', 'WR', 'TE'].includes(p.position));
+  }
   if (!cands.length) cands = pool;
-  return cands.length ? cands[Math.floor(Math.random() * cands.length)] : null;
+  // draft like a human: one of the top few by expert rank
+  const top = cands.slice(0, 3);
+  return top.length ? top[Math.floor(Math.random() * top.length)] : null;
 }
 
 async function maybeCpuPick() {
@@ -1858,14 +2139,25 @@ function renderDraftTab() {
         <button class="btn-small" onclick="copyInvite('${inviteUrl}')">📋 Copy invite link</button>
       </div>
       <p><b>Draft:</b> ${draftDate ? draftDate.toLocaleString(undefined, { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'not scheduled'}
+        <span id="draft-countdown" class="draft-countdown"></span>
         ${isCommish() ? `<button class="btn-ghost" style="margin-left:8px" onclick="changeDraftDate()">Change</button>` : ''}</p>
+      <p class="panel-sub">${Number(league.draft_clock) ? `⏱ ${league.draft_clock}s pick clock — when it expires, the top-ranked player is auto-picked` : '⏱ No pick clock'} ·
+        ${league.draft_order_mode === 'manual' ? 'commissioner-set draft order' : 'random snake order (revealed at start)'} ·
+        the draft starts automatically at the scheduled time once the league is full.</p>
       ${leagueRulesHtml(league)}
       <h3 style="margin-top:16px">Teams (${teams.length}/${league.num_teams})</h3>
-      <table><thead><tr><th>Team</th><th>Owner</th></tr></thead><tbody>
+      <table><thead><tr><th>Team</th><th>Owner</th>${league.draft_order_mode === 'manual' ? '<th>Draft pick</th>' : ''}</tr></thead><tbody>
         ${teams.map((t) => `<tr class="${t.owner_id === me.id ? 'me' : ''}">
           <td><b>${esc(t.name)}</b>${t.owner_id === league.commissioner_id ? ' <span title="Commissioner">Ⓒ</span>' : ''}</td>
-          <td>${esc(ownerName(t))}</td></tr>`).join('')}
+          <td>${esc(ownerName(t))}</td>
+          ${league.draft_order_mode === 'manual' ? `<td>${isCommish()
+            ? `<select id="do-${t.id}" class="do-select"><option value="">—</option>${Array.from({ length: league.num_teams }, (_, i) => `<option value="${i + 1}" ${t.draft_pos === i + 1 ? 'selected' : ''}>${i + 1}</option>`).join('')}</select>`
+            : (t.draft_pos ? `#${t.draft_pos}` : '—')}</td>` : ''}
+        </tr>`).join('')}
       </tbody></table>
+      ${league.draft_order_mode === 'manual' && isCommish()
+        ? `<p style="margin-top:10px"><button class="btn-small" onclick="saveDraftOrder()">💾 Save draft order</button>
+           <span class="hint" style="font-size:12px"> — teams without a number get a random remaining spot at start.</span></p>` : ''}
       ${isCommish() ? `
         ${full ? '' : `<p style="margin-top:14px"><button class="btn-small purple" onclick="addCpuTeams()">🤖 Fill the ${league.num_teams - teams.length} open spot${league.num_teams - teams.length > 1 ? 's' : ''} with CPU teams</button>
           <span class="hint" style="font-size:12px"> — great for testing; they autopick in the draft and never touch their lineup.</span></p>`}
@@ -1887,8 +2179,10 @@ function renderDraftTab() {
       <div class="on-clock ${myTurn ? 'my-turn' : ''}">
         <div><div class="oc-label">Round ${round} · Pick ${overall} of ${order.length * draftRounds()}</div>
           <div class="oc-team">${myTurn ? '🎉 YOU\'RE ON THE CLOCK!' : `On the clock: ${esc(clock?.name || '…')} (${esc(ownerName(clock))})`}</div></div>
+        <span id="pick-clock" class="pick-clock"></span>
         <div class="oc-label">Snake order: ${order.map((t) => esc(t.name.split(' ')[0])).join(' → ')}${leagueHasCpu() ? '<br>🤖 CPU teams autopick while the commissioner has this room open' : ''}</div>
       </div>
+      <div id="coach-call"></div>
       <div class="draft-grid">
         <div class="panel">
           <h3>Player Pool</h3>
@@ -1914,6 +2208,7 @@ function renderDraftTab() {
         </div>
       </div>`;
     renderDraftPool();
+    renderCoachCall();
     return;
   }
 
@@ -1939,17 +2234,18 @@ function renderDraftPool() {
   const myTurn = clock && clock.owner_id === me.id;
   const drafted = new Set(draftPicks.map((p) => p.nfl_player_id));
   const q = (window._draftQ || '').toLowerCase();
-  let pool = [...nflPlayers.values()].filter((p) => !drafted.has(p.id))
+  let pool = [...nflPlayers.values()].filter((p) => !drafted.has(p.id) && p.team)
     .filter((p) => (window._draftPos || 'ALL') === 'ALL' || p.position === window._draftPos)
     .filter((p) => !q || p.name.toLowerCase().includes(q) || (p.team || '').toLowerCase().includes(q));
-  pool.sort((a, b) => (POS_ORDER[a.position] ?? 9) - (POS_ORDER[b.position] ?? 9) || a.name.localeCompare(b.name));
+  pool.sort(byRank);
   pool = pool.slice(0, 100);
   box.innerHTML = pool.map((p) => `<div class="pool-row">
-      <span class="pos-badge pos-${p.position}">${p.position}</span>
+      <span class="rank-chip">${fmtRank(p)}</span>
+      <span class="pos-badge pos-${p.position}">${posRankLabel(p)}</span>
       <img class="headshot" src="${esc(p.headshot || '')}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"/>
       <div class="p-info">
         <div class="p-name" onclick="openProfile('${p.id}')">${esc(p.name)}</div>
-        <div class="p-meta">${teamFull(p.team)}</div>
+        <div class="p-meta">${teamFull(p.team)}${byeOf(p.team) ? ` · Bye W${byeOf(p.team)}` : ''}</div>
       </div>
       <button class="btn-small" ${myTurn ? '' : 'disabled'} onclick="draftPlayer('${p.id}')">Draft</button>
     </div>`).join('') || '<p class="empty-note">No players match.</p>';
@@ -1977,20 +2273,11 @@ async function changeDraftDate() {
 
 async function startDraft() {
   if (!isCommish() || teams.length < league.num_teams) return;
-  if (!confirm(`Start the draft?\n\nThis randomizes the snake order and assigns divisions. All ${league.num_teams} owners should be here!`)) return;
-  const shuffled = [...teams].sort(() => Math.random() - 0.5);
-  for (let i = 0; i < shuffled.length; i++) {
-    await sb.from('ff_teams').update({
-      draft_pos: i + 1,
-      division: (i % league.num_divisions) + 1,
-    }).eq('id', shuffled[i].id);
-  }
-  const { error } = await sb.from('ff_leagues').update({ status: 'drafting' })
-    .eq('id', league.id).eq('status', 'pre_draft');
-  if (error) return toast(error.message, true);
-  await loadLeague(league.id);
-  showTab('draft');
-  toast('The draft is LIVE! 🚀');
+  const orderNote = league.draft_order_mode === 'manual'
+    ? 'Your saved draft order will be used (unset teams get random spots).'
+    : 'The snake order will be randomized.';
+  if (!confirm(`Start the draft?\n\n${orderNote} All ${league.num_teams} owners should be here!`)) return;
+  await beginDraft(false);
 }
 
 async function draftPlayer(pid) {

@@ -177,6 +177,19 @@
               <option value="4">4 teams — semis &amp; championship (weeks 16–17)</option>
               <option value="2">2 teams — championship game only (week 17)</option>
             </select>
+            <label>Draft Order</label>
+            <select id="cl-ordermode">
+              <option value="random" selected>Random snake — order revealed at draft start</option>
+              <option value="manual">Commissioner sets the order before the draft</option>
+            </select>
+            <label>Pick Clock <span class="hint">(clock expires → top-ranked player is auto-picked)</span></label>
+            <select id="cl-clock">
+              <option value="0">No limit</option>
+              <option value="30">30 seconds</option>
+              <option value="60">60 seconds</option>
+              <option value="90" selected>90 seconds</option>
+              <option value="120">2 minutes</option>
+            </select>
             <label>Roster Construction <span class="hint">(spots per team — 0 means the position isn't used)</span></label>
             <div class="roster-grid" id="cl-roster"></div>
             <p class="rc-summary" id="cl-roster-summary"></p>
