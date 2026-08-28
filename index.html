@@ -120,7 +120,7 @@
             <div class="roster-grid" id="cl-roster"></div>
             <p class="rc-summary" id="cl-roster-summary"></p>
             <label>Scoring</label>
-            <select id="cl-scoring-preset" onchange="applyScoringPreset()">
+            <select id="cl-scoring-preset" onchange="applyScoringPreset('cl')">
               <option value="ppr" selected>Standard — full PPR (1 pt per reception)</option>
               <option value="half">Half PPR (0.5 per reception)</option>
               <option value="std">Standard — non-PPR</option>
@@ -166,6 +166,7 @@
         <button id="nav-draft" class="nav-btn" onclick="showTab('draft')">Draft</button>
       </nav>
       <div class="user-box">
+        <button id="settings-btn" class="btn-ghost hidden" onclick="openLeagueSettings()" title="League settings (commissioner)">⚙️ Rules</button>
         <button id="refresh-btn" class="btn-ghost" onclick="manualRefresh()" title="Refresh live stats">⟳</button>
         <span id="user-chip" class="user-chip"></span>
         <button class="btn-ghost" onclick="logout()">Sign out</button>

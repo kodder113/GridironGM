@@ -209,87 +209,182 @@ function populateCreateLeagueSelects() {
   buildScoringEditor();
 }
 
-// ---- create-league: roster construction editor ----
+// ---- roster & scoring editors (used by Create League and League Settings) ----
 const ROSTER_EDIT = [
   { pos: 'QB', label: 'QB', max: 3 }, { pos: 'RB', label: 'RB', max: 5 },
   { pos: 'WR', label: 'WR', max: 5 }, { pos: 'TE', label: 'TE', max: 3 },
   { pos: 'FLEX', label: 'FLEX', max: 3 }, { pos: 'K', label: 'K', max: 2 },
   { pos: 'DST', label: 'DEF', max: 2 }, { pos: 'BN', label: 'Bench', max: 10 },
 ];
-function buildRosterEditor() {
-  $('cl-roster').innerHTML = ROSTER_EDIT.map(({ pos, label, max }) => `
+function rosterEditorHtml(prefix, values) {
+  return ROSTER_EDIT.map(({ pos, label, max }) => `
     <div class="rc-item"><span class="rc-label ${pos === 'BN' ? '' : 'pos-' + pos}">${label}</span>
-      <select id="cl-r-${pos}" onchange="updateRosterSummary()">
-        ${Array.from({ length: max + 1 }, (_, i) => `<option value="${i}" ${i === DEFAULT_ROSTER[pos] ? 'selected' : ''}>${i}</option>`).join('')}
+      <select id="${prefix}-r-${pos}" onchange="updateRosterSummary('${prefix}')">
+        ${Array.from({ length: max + 1 }, (_, i) => `<option value="${i}" ${i === (Number(values[pos]) || 0) ? 'selected' : ''}>${i}</option>`).join('')}
       </select></div>`).join('');
-  updateRosterSummary();
 }
-function collectRosterForm() {
+function buildRosterEditor() {
+  $('cl-roster').innerHTML = rosterEditorHtml('cl', DEFAULT_ROSTER);
+  updateRosterSummary('cl');
+}
+function collectRosterForm(prefix) {
   const r = {};
-  ROSTER_EDIT.forEach(({ pos }) => { r[pos] = parseInt($(`cl-r-${pos}`).value, 10) || 0; });
+  ROSTER_EDIT.forEach(({ pos }) => { r[pos] = parseInt($(`${prefix}-r-${pos}`).value, 10) || 0; });
   return r;
 }
-function updateRosterSummary() {
-  const r = collectRosterForm();
+function updateRosterSummary(prefix) {
+  const el = $(`${prefix}-roster-summary`);
+  if (!el) return;
+  const r = collectRosterForm(prefix);
   const starters = STARTER_POS.reduce((s, p) => s + r[p], 0);
-  $('cl-roster-summary').textContent =
+  el.textContent =
     `${starters} starters + ${r.BN} bench = ${starters + r.BN} roster spots → a ${starters + r.BN}-round draft`;
 }
 
-// ---- create-league: scoring editor ----
-function buildScoringEditor() {
-  $('cl-scoring-grid').innerHTML = SCORING_DEFS.map((d) => {
-    const v = DEFAULT_SCORING[d.key];
+// ---- scoring editor ----
+function scoringEditorHtml(prefix, sc) {
+  return SCORING_DEFS.map((d) => {
+    const v = sc[d.key];
     if (d.yardage) {
+      const rule = (typeof v === 'object' && v) || { pts: v, per: 1, whole: false };
       return `<div class="sc-row yardage">
         <span class="sc-label">${d.label}</span>
         <span class="sc-inputs">
-          <input type="number" step="any" id="sc-${d.key}-pts" value="${v.pts}" onchange="markCustomScoring()"/> pts per
-          <input type="number" step="1" min="1" id="sc-${d.key}-per" value="${v.per}" onchange="markCustomScoring()"/> yds
-          <select id="sc-${d.key}-mode" onchange="markCustomScoring()">
-            <option value="frac" selected>every yard counts (fractional)</option>
-            <option value="whole">whole chunks only — leftovers score 0</option>
+          <input type="number" step="any" id="${prefix}-sc-${d.key}-pts" value="${Number(rule.pts) || 0}" onchange="markCustomScoring('${prefix}')"/> pts per
+          <input type="number" step="1" min="1" id="${prefix}-sc-${d.key}-per" value="${Number(rule.per) || 1}" onchange="markCustomScoring('${prefix}')"/> yds
+          <select id="${prefix}-sc-${d.key}-mode" onchange="markCustomScoring('${prefix}')">
+            <option value="frac" ${rule.whole ? '' : 'selected'}>every yard counts (fractional)</option>
+            <option value="whole" ${rule.whole ? 'selected' : ''}>whole chunks only — leftovers score 0</option>
           </select></span></div>`;
     }
     return `<div class="sc-row">
       <span class="sc-label">${d.label}</span>
-      <span class="sc-inputs"><input type="number" step="any" id="sc-${d.key}" value="${v}" onchange="markCustomScoring()"/> pts</span></div>`;
+      <span class="sc-inputs"><input type="number" step="any" id="${prefix}-sc-${d.key}" value="${Number(v) || 0}" onchange="markCustomScoring('${prefix}')"/> pts</span></div>`;
   }).join('') + `<p class="form-note">"Whole chunks only" is strict: at 10 pts per 10 yds, 7 yards is 0 points and 27 yards is 20 — only completed chunks count.
     D/ST points-allowed uses the standard tiers (0 pts allowed = 10 … 35+ = −4).</p>`;
 }
-function markCustomScoring() { $('cl-scoring-preset').value = 'custom'; }
-function applyScoringPreset() {
-  const key = $('cl-scoring-preset').value;
+function buildScoringEditor() {
+  $('cl-scoring-grid').innerHTML = scoringEditorHtml('cl', DEFAULT_SCORING);
+}
+function markCustomScoring(prefix) { const el = $(`${prefix}-scoring-preset`); if (el) el.value = 'custom'; }
+function applyScoringPreset(prefix) {
+  const key = $(`${prefix}-scoring-preset`).value;
   const preset = SCORING_PRESETS[key];
-  if (!preset) { $('cl-scoring-editor').open = true; return; }
+  if (!preset) { const ed = $(`${prefix}-scoring-editor`); if (ed) ed.open = true; return; }
   const sc = { ...DEFAULT_SCORING, ...preset.patch };
   SCORING_DEFS.forEach((d) => {
     const v = sc[d.key];
     if (d.yardage) {
-      $(`sc-${d.key}-pts`).value = v.pts;
-      $(`sc-${d.key}-per`).value = v.per;
-      $(`sc-${d.key}-mode`).value = v.whole ? 'whole' : 'frac';
+      $(`${prefix}-sc-${d.key}-pts`).value = v.pts;
+      $(`${prefix}-sc-${d.key}-per`).value = v.per;
+      $(`${prefix}-sc-${d.key}-mode`).value = v.whole ? 'whole' : 'frac';
     } else {
-      $(`sc-${d.key}`).value = v;
+      $(`${prefix}-sc-${d.key}`).value = v;
     }
   });
   // re-select the preset (the inputs' onchange flipped it to custom)
-  $('cl-scoring-preset').value = key;
+  $(`${prefix}-scoring-preset`).value = key;
 }
-function collectScoringForm() {
+function collectScoringForm(prefix) {
   const sc = {};
   SCORING_DEFS.forEach((d) => {
     if (d.yardage) {
       sc[d.key] = {
-        pts: parseFloat($(`sc-${d.key}-pts`).value) || 0,
-        per: Math.max(1, parseInt($(`sc-${d.key}-per`).value, 10) || 1),
-        whole: $(`sc-${d.key}-mode`).value === 'whole',
+        pts: parseFloat($(`${prefix}-sc-${d.key}-pts`).value) || 0,
+        per: Math.max(1, parseInt($(`${prefix}-sc-${d.key}-per`).value, 10) || 1),
+        whole: $(`${prefix}-sc-${d.key}-mode`).value === 'whole',
       };
     } else {
-      sc[d.key] = parseFloat($(`sc-${d.key}`).value) || 0;
+      sc[d.key] = parseFloat($(`${prefix}-sc-${d.key}`).value) || 0;
     }
   });
   return sc;
+}
+function detectPreset(sc) {
+  for (const [key, preset] of Object.entries(SCORING_PRESETS)) {
+    if (JSON.stringify({ ...DEFAULT_SCORING, ...preset.patch }) === JSON.stringify({ ...DEFAULT_SCORING, ...sc })) return key;
+  }
+  return 'custom';
+}
+
+// ---- commissioner: League Settings (rules editable like the big apps) ----
+// Scoring & name: any time — scoring re-applies retroactively since every week
+// is re-scored from raw stat lines. Structure (teams, divisions, playoffs,
+// roster construction): only until the draft starts.
+function openLeagueSettings() {
+  if (!isCommish()) return;
+  const preDraft = league.status === 'pre_draft';
+  const sc = leagueScoring(league);
+  const presetSel = `<select id="ls-scoring-preset" onchange="applyScoringPreset('ls')">
+      ${Object.entries(SCORING_PRESETS).map(([k, p]) => `<option value="${k}" ${detectPreset(league.scoring || {}) === k ? 'selected' : ''}>${p.label}</option>`).join('')}
+      <option value="custom" ${detectPreset(league.scoring || {}) === 'custom' ? 'selected' : ''}>Custom</option>
+    </select>`;
+  const structure = preDraft ? `
+    <label class="ls-label">Number of Teams</label>
+    <select id="ls-teams" onchange="updateDivisionOptions('ls')">
+      ${[4, 6, 8, 10, 12, 14, 16].filter((n) => n >= teams.length).map((n) =>
+        `<option value="${n}" ${n === league.num_teams ? 'selected' : ''}>${n} teams</option>`).join('')}
+    </select>
+    <label class="ls-label">Divisions</label>
+    <select id="ls-divisions"></select>
+    <label class="ls-label">Playoff Teams</label>
+    <select id="ls-playoffs">
+      <option value="6" ${league.playoff_teams === 6 ? 'selected' : ''}>6 teams — top 2 seeds get a bye</option>
+      <option value="4" ${league.playoff_teams === 4 ? 'selected' : ''}>4 teams — semis &amp; championship</option>
+    </select>
+    <label class="ls-label">Roster Construction</label>
+    <div class="roster-grid" id="ls-roster">${rosterEditorHtml('ls', leagueRoster(league))}</div>
+    <p class="rc-summary" id="ls-roster-summary"></p>`
+    : `<p class="form-note">🔒 Teams, divisions, playoff format, and roster construction are locked once the draft has started — the draft and schedule were built on them.</p>`;
+  openModal(`
+    <div class="modal-head"><h3>⚙️ League Settings</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button></div>
+    <div class="stack-form">
+      <label class="ls-label">League Name</label>
+      <input type="text" id="ls-name" value="${esc(league.name)}" maxlength="40"/>
+      ${structure}
+      <label class="ls-label">Scoring</label>
+      ${presetSel}
+      <details class="scoring-editor" id="ls-scoring-editor" ${preDraft ? '' : 'open'}>
+        <summary>⚙️ Edit point values</summary>
+        <div id="ls-scoring-grid">${scoringEditorHtml('ls', sc)}</div>
+      </details>
+      <p class="form-note">Scoring changes apply <b>retroactively</b>: every week of the season is re-scored from the raw stat lines, just like the big fantasy apps.
+        The only exception is a live-coaching sub already made — its point split stays frozen at the values snapshotted when the sub happened.</p>
+      <button class="btn-primary" onclick="saveLeagueSettings()">Save League Settings</button>
+    </div>`);
+  if (preDraft) {
+    updateDivisionOptions('ls');
+    $('ls-divisions').value = String(league.num_divisions);
+    if ($('ls-divisions').value !== String(league.num_divisions)) $('ls-divisions').selectedIndex = 0;
+    updateRosterSummary('ls');
+  }
+}
+
+async function saveLeagueSettings() {
+  if (!isCommish()) return;
+  const upd = { scoring: collectScoringForm('ls') };
+  const name = $('ls-name').value.trim();
+  if (name) upd.name = name;
+  if (league.status === 'pre_draft') {
+    const num_teams = parseInt($('ls-teams').value, 10);
+    const num_divisions = parseInt($('ls-divisions').value, 10);
+    const playoff_teams = parseInt($('ls-playoffs').value, 10);
+    if (num_teams < teams.length)
+      return toast(`You already have ${teams.length} teams — can't shrink below that.`, true);
+    if (num_teams % num_divisions !== 0)
+      return toast('Divisions must split the teams evenly.', true);
+    const roster = collectRosterForm('ls');
+    if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
+      return toast('Your roster needs at least one starting spot!', true);
+    Object.assign(upd, { num_teams, num_divisions, playoff_teams, roster });
+  }
+  const { error } = await sb.from('ff_leagues').update(upd).eq('id', league.id);
+  if (error) return toast(error.message, true);
+  await loadLeague(league.id);
+  closeModal();
+  renderTab();
+  toast('League rules updated — all scores recalculated ✓');
 }
 
 // League rules summary shown in Draft Central / Draft Recap
@@ -313,9 +408,9 @@ function leagueRulesHtml(l) {
   </details>`;
 }
 
-function updateDivisionOptions() {
-  const n = parseInt($('cl-teams').value, 10);
-  const sel = $('cl-divisions');
+function updateDivisionOptions(prefix = 'cl') {
+  const n = parseInt($(`${prefix}-teams`).value, 10);
+  const sel = $(`${prefix}-divisions`);
   sel.innerHTML = '';
   const opts = [1, 2, 3, 4].filter((d) => d === 1 || (n % d === 0 && n / d >= 2));
   opts.forEach((d) => {
@@ -444,10 +539,10 @@ async function handleCreateLeague(e) {
   const draftLocal = $('cl-draft').value;
   const teamName = $('cl-teamname').value.trim();
   if (!name || !teamName || !draftLocal) return;
-  const roster = collectRosterForm();
+  const roster = collectRosterForm('cl');
   if (STARTER_POS.reduce((sum, p) => sum + roster[p], 0) < 1)
     return toast('Your roster needs at least one starting spot!', true);
-  const scoring = collectScoringForm();
+  const scoring = collectScoringForm('cl');
   const { data: lg, error } = await sb.from('ff_leagues').insert({
     name, commissioner_id: me.id, season: SEASON,
     num_teams, num_divisions, playoff_teams,
@@ -503,6 +598,7 @@ async function openLeague(id) {
   selectedWeek = Math.min(currentNflWeek, FANTASY_WEEKS);
   activeTab = league.status === 'active' || league.status === 'complete' ? 'team' : 'draft';
   $('user-chip').textContent = `👤 ${me.name}`;
+  $('settings-btn').classList.toggle('hidden', !isCommish());
   showTab(activeTab);
   startLiveTimer();
 }

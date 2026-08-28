@@ -25,6 +25,7 @@ Scoring math for a subbed slot: `out_points_at_swap + (in_player_final − in_po
   - *whole chunks only* — strict, e.g. **10 pts per 10 yds means 7 yards = 0** (the chunk wasn't completed; 27 yards = 20)
 
   Raw stat lines are shared league-to-league, but every league re-scores them with its own rules — including the live-coaching point snapshots.
+- **The commissioner can change the rules later** (the ⚙️ Rules button) — like the big apps: scoring and league name are editable *any time*, and a scoring change applies **retroactively** (every week re-scores from raw stats; only already-made live-sub snapshots stay frozen). Structural settings — team count, divisions, playoff format, roster construction — are editable until the draft starts, then lock, since the draft and schedule were built on them.
 - **Season length**: the NFL plays 18 weeks, but the fantasy season is **17 — always total weeks minus one** — because nobody plays their starters in Week 18.
   - 6-team playoffs: regular season weeks 1–14, quarterfinals W15 (top 2 seeds bye), semis W16, championship W17.
   - 4-team playoffs: regular season weeks 1–15, semis W16, championship W17.
